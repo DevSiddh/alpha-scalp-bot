@@ -182,7 +182,7 @@ class TelegramAlerts:
     async def send_startup_message(self) -> bool:
         """Announce that the bot has started."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        mode = "TESTNET (Paper)" if cfg.BINANCE_TESTNET else "LIVE"
+        mode = "DEMO (Paper)" if cfg.BINANCE_DEMO_TRADING else "LIVE"
         text = (
             f"<b>[START] Alpha-Scalp Bot Online</b>\n"
             f"\n"
