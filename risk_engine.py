@@ -197,22 +197,24 @@ class RiskEngine:
     # SL / TP
     # -----------------------------------------------------------------
     def get_stop_loss(self, entry_price: float, side: str) -> float:
-        """Return absolute stop-loss price (0.5 % from entry)."""
+        """SL with taker fee + slippage buffer."""
+        buffer = 0.0008  # 0.08% extra safety
         if side.upper() == "BUY":
-            sl = entry_price * (1 - self.stop_loss_pct)
+            sl = entry_price * (1 - self.stop_loss_pct - buffer)
         else:
-            sl = entry_price * (1 + self.stop_loss_pct)
-        logger.debug("SL for {} @ {:.2f} -> {:.2f}", side, entry_price, sl)
-        return round(sl, 2)
+            sl = entry_price * (1 + self.stop_loss_pct + buffer)
+        logger.debug("SL for {} @ {:.2f} -> {:.2f} (buffer={:.4f})", side, entry_price, sl, buffer)
+        return float(self.exchange.price_to_precision(self.symbol, sl))
 
     def get_take_profit(self, entry_price: float, side: str) -> float:
-        """Return absolute take-profit price (1.0 % from entry – 2:1 R/R)."""
+        """TP with taker fee buffer."""
+        buffer = 0.0008
         if side.upper() == "BUY":
-            tp = entry_price * (1 + self.take_profit_pct)
+            tp = entry_price * (1 + self.take_profit_pct - buffer)
         else:
-            tp = entry_price * (1 - self.take_profit_pct)
-        logger.debug("TP for {} @ {:.2f} -> {:.2f}", side, entry_price, tp)
-        return round(tp, 2)
+            tp = entry_price * (1 - self.take_profit_pct - buffer)
+        logger.debug("TP for {} @ {:.2f} -> {:.2f} (buffer={:.4f})", side, entry_price, tp, buffer)
+        return float(self.exchange.price_to_precision(self.symbol, tp))
 
     # -----------------------------------------------------------------
     # Position-Count Guard
