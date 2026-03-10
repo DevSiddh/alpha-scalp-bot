@@ -55,17 +55,11 @@ def _create_exchange() -> ccxt.Exchange:
             **common_cfg,
             "options": {**common_cfg["options"], "defaultType": "future"},
         })
-        # Override futures API endpoints to demo.binance.com
+        # Override ONLY fapi (USDT-M futures) endpoints to demo.binance.com
+        # demo.binance.com does NOT support dapi (coin-M) or sapi/papi
         demo_base = "https://demo.binance.com"
         for key in list(exchange.urls["api"].keys()):
-            if key.startswith("fapi") or key.startswith("dapi"):
-                orig = exchange.urls["api"][key]
-                # Replace the host portion, keep the path
-                path = orig.split(".com", 1)[-1] if ".com" in orig else ""
-                exchange.urls["api"][key] = demo_base + path
-        # Also override sapi/papi for account endpoints
-        for key in ["sapi", "papi"]:
-            if key in exchange.urls["api"]:
+            if key.startswith("fapi"):
                 orig = exchange.urls["api"][key]
                 path = orig.split(".com", 1)[-1] if ".com" in orig else ""
                 exchange.urls["api"][key] = demo_base + path
