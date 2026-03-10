@@ -6,6 +6,9 @@ Signal generation pipeline:
 3. Nadaraya-Watson Gaussian kernel envelope for mean-reversion context
 
 A trade signal fires only when ALL three conditions align.
+
+Note: This module is exchange-agnostic. It operates purely on OHLCV
+DataFrames and does not make any exchange API calls directly.
 """
 
 from __future__ import annotations
@@ -287,7 +290,7 @@ class ScalpStrategy:
             ]
 
         else:
-            reasons = ["No confluence – HOLD"]
+            reasons = ["No confluence \u2013 HOLD"]
 
         reason_str = " | ".join(reasons)
 
