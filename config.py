@@ -18,7 +18,6 @@ from loguru import logger
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
 
-
 def _env(key: str, default: str | None = None, cast: type = str):
     """Read an env var, cast it, and return *default* when missing."""
     raw = os.getenv(key, default)
@@ -28,11 +27,10 @@ def _env(key: str, default: str | None = None, cast: type = str):
         return raw.lower() in ("1", "true", "yes")
     return cast(raw)
 
-
 # ===== Exchange Credentials =================================================
 BINANCE_API_KEY: str = _env("BINANCE_API_KEY", "")
 BINANCE_SECRET: str = _env("BINANCE_SECRET", "")
-BINANCE_TESTNET: bool = _env("BINANCE_TESTNET", "true", cast=bool)
+BINANCE_DEMO_TRADING: bool = _env("BINANCE_DEMO_TRADING", "true", cast=bool)
 
 # ===== Telegram Alerts ======================================================
 TELEGRAM_BOT_TOKEN: str = _env("TELEGRAM_BOT_TOKEN", "")
@@ -97,7 +95,7 @@ logger.info("=" * 60)
 logger.info("Alpha-Scalp Bot | Binance Futures | config loaded")
 logger.info(f"Symbol       : {SYMBOL}")
 logger.info(f"Timeframe    : {TIMEFRAME}")
-logger.info(f"Testnet      : {BINANCE_TESTNET}")
+logger.info(f"Demo Trading : {BINANCE_DEMO_TRADING}")
 logger.info(f"Leverage     : {LEVERAGE}x")
 logger.info(f"Risk / Trade : {RISK_PER_TRADE:.1%}")
 logger.info(f"Daily DD Cap : {DAILY_DRAWDOWN_LIMIT:.1%}")
