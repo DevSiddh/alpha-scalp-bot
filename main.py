@@ -46,10 +46,15 @@ def _create_exchange() -> ccxt.Exchange:
     )
 
     if cfg.BINANCE_DEMO_TRADING:
-        # Binance demo trading – uses live API with demo-enabled keys
-        # Generate demo API keys at: https://www.binance.com/en/support/faq/demo-trading
-        exchange.options["defaultType"] = "future"
-        logger.info("Exchange: Binance Futures DEMO (paper trading)")
+        # Binance demo/testnet – uses testnet endpoint
+        exchange.set_sandbox_mode(True)
+        exchange.urls["api"] = {
+            "public": "https://testnet.binancefuture.com/fapi/v1",
+            "private": "https://testnet.binancefuture.com/fapi/v1",
+            "fapiPublic": "https://testnet.binancefuture.com/fapi/v1",
+            "fapiPrivate": "https://testnet.binancefuture.com/fapi/v1",
+        }
+        logger.info("Exchange: Binance Futures DEMO (testnet)")
     else:
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
 
