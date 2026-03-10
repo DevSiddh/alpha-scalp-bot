@@ -5,10 +5,12 @@ Handles:
 - Position sizing (1 % equity risk per trade)
 - Stop-loss / take-profit calculation
 - Max open-position enforcement
+- Per-loop balance caching to reduce API calls
 """
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -45,6 +47,11 @@ class RiskEngine:
         self.daily_wins: int = 0
         self.kill_switch_active: bool = False
 
+        # Balance cache (Fix 4) – avoids duplicate fetch_balance calls per loop
+        self._cached_balance: float = 0.0
+        self._cache_timestamp: float = 0.0
+        self._cache_ttl: float = 3.0  # seconds – valid for one loop iteration
+
         # Initialise on first run
         self._sync_daily_balance()
         logger.info(
@@ -57,18 +64,42 @@ class RiskEngine:
         )
 
     # -----------------------------------------------------------------
-    # Balance helpers
+    # Balance helpers (with cache – Fix 4)
     # -----------------------------------------------------------------
     def _fetch_usdt_balance(self) -> float:
-        """Return total USDT equity from Binance Futures."""
+        """Return total USDT equity from Binance Futures (always fresh)."""
         try:
             bal = self.exchange.fetch_balance({"type": "future"})
             total = float(bal.get("total", {}).get("USDT", 0.0))
-            logger.debug("Fetched USDT balance: {:.4f}", total)
+            # Update cache on every fresh fetch
+            self._cached_balance = total
+            self._cache_timestamp = time.monotonic()
+            logger.debug("Fetched USDT balance: {:.4f} (cache refreshed)", total)
             return total
         except Exception as exc:
             logger.error("Failed to fetch balance: {}", exc)
             raise
+
+    def get_cached_balance(self) -> float:
+        """Return USDT balance from cache if fresh, otherwise fetch.
+
+        Cache TTL is ~3 seconds, meaning within a single loop iteration
+        (5s interval), at most ONE API call is made for balance.
+        """
+        now = time.monotonic()
+        if (now - self._cache_timestamp) < self._cache_ttl and self._cached_balance > 0:
+            logger.debug(
+                "Using cached balance: {:.4f} (age={:.1f}s)",
+                self._cached_balance,
+                now - self._cache_timestamp,
+            )
+            return self._cached_balance
+        return self._fetch_usdt_balance()
+
+    def invalidate_balance_cache(self) -> None:
+        """Force next balance read to hit the API."""
+        self._cache_timestamp = 0.0
+        logger.debug("Balance cache invalidated")
 
     def _sync_daily_balance(self) -> None:
         """Snapshot balance for daily drawdown tracking."""
@@ -87,22 +118,20 @@ class RiskEngine:
     def check_kill_switch(self) -> bool:
         """Return *True* if trading must stop (daily drawdown >= limit).
 
-        Compares current equity against *daily_start_balance*.
-        Once triggered the flag stays active until :meth:`reset_daily`.
+        Uses cached balance to avoid extra API call.
         """
         if self.kill_switch_active:
             return True
 
         try:
-            current_balance = self._fetch_usdt_balance()
+            current_balance = self.get_cached_balance()
         except Exception:
-            # If we can't read balance, err on the side of caution
-            logger.warning("Balance read failed \u2013 activating kill switch")
+            logger.warning("Balance read failed – activating kill switch")
             self.kill_switch_active = True
             return True
 
         if self.daily_start_balance <= 0:
-            logger.warning("Daily start balance is zero \u2013 activating kill switch")
+            logger.warning("Daily start balance is zero – activating kill switch")
             self.kill_switch_active = True
             return True
 
@@ -128,23 +157,17 @@ class RiskEngine:
         return False
 
     # -----------------------------------------------------------------
-    # Position Sizing
+    # Position Sizing (now uses cached balance)
     # -----------------------------------------------------------------
     def calculate_position_size(
         self, entry_price: float, stop_price: float
     ) -> float:
         """Calculate position size in *base currency* units.
 
-        Uses ``RISK_PER_TRADE`` percentage of equity and the distance
-        between *entry_price* and *stop_price* to derive the max
-        position that keeps the dollar risk within budget.
-
-        Returns
-        -------
-        float
-            Position size in base units (e.g. BTC).
+        Uses cached balance instead of a fresh API call – the kill-switch
+        check earlier in the loop already refreshed the cache.
         """
-        equity = self._fetch_usdt_balance()
+        equity = self.get_cached_balance()
         risk_amount = equity * self.risk_per_trade  # e.g. 1 % of equity
 
         price_distance = abs(entry_price - stop_price)
@@ -183,7 +206,7 @@ class RiskEngine:
         return round(sl, 2)
 
     def get_take_profit(self, entry_price: float, side: str) -> float:
-        """Return absolute take-profit price (1.0 % from entry \u2013 2:1 R/R)."""
+        """Return absolute take-profit price (1.0 % from entry – 2:1 R/R)."""
         if side.upper() == "BUY":
             tp = entry_price * (1 + self.take_profit_pct)
         else:
