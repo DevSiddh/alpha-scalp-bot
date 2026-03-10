@@ -33,31 +33,22 @@ from telegram_alerts import TelegramAlerts
 # ---------------------------------------------------------------------------
 def _create_exchange() -> ccxt.Exchange:
     """Instantiate and configure the Binance Futures CCXT client."""
-    exchange = ccxt.binance(
-        {
-            "apiKey": cfg.BINANCE_API_KEY,
-            "secret": cfg.BINANCE_SECRET,
-            "enableRateLimit": True,
-            "options": {
-                "defaultType": "future",       # Binance USD-M Futures
-                "adjustForTimeDifference": True,
-            },
-        }
-    )
+    common_cfg = {
+        "apiKey": cfg.BINANCE_API_KEY,
+        "secret": cfg.BINANCE_SECRET,
+        "enableRateLimit": True,
+        "options": {
+            "adjustForTimeDifference": True,
+        },
+    }
 
     if cfg.BINANCE_DEMO_TRADING:
-        # Binance Futures testnet — surgically override only futures endpoints
-        testnet = "https://testnet.binancefuture.com"
-        for key in list(exchange.urls.get("api", {}).keys()):
-            if "fapi" in key.lower():
-                exchange.urls["api"][key] = testnet + "/fapi/v1"
-        # Also override v2 endpoints if present
-        if "fapiPrivateV2" in exchange.urls.get("api", {}):
-            exchange.urls["api"]["fapiPrivateV2"] = testnet + "/fapi/v2"
-        if "fapiPublicV2" in exchange.urls.get("api", {}):
-            exchange.urls["api"]["fapiPublicV2"] = testnet + "/fapi/v2"
-        logger.info("Exchange: Binance Futures TESTNET")
+        # Use binanceusdm (USDT-M only) to avoid dapiPublic sandbox error
+        exchange = ccxt.binanceusdm(common_cfg)
+        exchange.set_sandbox_mode(True)
+        logger.info("Exchange: Binance Futures TESTNET (binanceusdm sandbox)")
     else:
+        exchange = ccxt.binance({**common_cfg, "options": {**common_cfg["options"], "defaultType": "future"}})
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
 
     # Verify connectivity
