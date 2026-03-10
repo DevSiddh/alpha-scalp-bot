@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from config import cfg
+import config as cfg
 
 _TG_API = "https://api.telegram.org"
 
