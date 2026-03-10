@@ -47,6 +47,7 @@ class TradeSignal:
     nw_upper: float
     nw_lower: float
     reason: str
+    atr: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +226,9 @@ class ScalpStrategy:
         ema_slow = ta.ema(close, length=self.ema_slow_period)
         rsi = ta.rsi(close, length=self.rsi_period)
 
+        # ATR for dynamic SL/TP
+        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=cfg.SCALP_SL_ATR_PERIOD)
+
         # --- Adaptive NW bandwidth via ATR --------------------------------
         atr = ta.atr(df['high'], df['low'], df['close'], length=14)
         curr_atr = float(atr.iloc[-1]) if not pd.isna(atr.iloc[-1]) else 100.0
@@ -299,6 +303,9 @@ class ScalpStrategy:
 
         reason_str = " | ".join(reasons)
 
+        # Latest ATR value for SL/TP
+        curr_atr = float(df["atr"].iloc[-1]) if not pd.isna(df["atr"].iloc[-1]) else 0.0
+
         trade_signal = TradeSignal(
             signal=signal,
             confidence=round(confidence, 3),
@@ -310,6 +317,7 @@ class ScalpStrategy:
             nw_upper=round(curr_nw_upper, 2),
             nw_lower=round(curr_nw_lower, 2),
             reason=reason_str,
+            atr=round(curr_atr, 2),
         )
 
         if signal != Signal.HOLD:
