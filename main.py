@@ -49,12 +49,14 @@ def _create_exchange() -> ccxt.Exchange:
     }
 
     if cfg.BINANCE_DEMO_TRADING:
-        # Binance Demo Trading (replaced old testnet/sandbox)
-        # Requires CCXT >= 4.5.6 and demo-specific API keys from:
-        # https://www.binance.com/en/support/faq/detail/9be58f73e5e14338809e3b705b9687dd
-        exchange = ccxt.binance({**common_cfg, "options": {**common_cfg["options"], "defaultType": "future"}})
-        exchange.enable_demo_trading(True)
-        logger.info("Exchange: Binance Futures DEMO TRADING (paper)")
+        # Binance Futures Testnet for paper trading
+        # Get testnet keys from: https://testnet.binancefuture.com
+        exchange = ccxt.binance({
+            **common_cfg,
+            "options": {**common_cfg["options"], "defaultType": "future"},
+            "sandbox": True,
+        })
+        logger.info("Exchange: Binance Futures TESTNET (paper)")
     else:
         exchange = ccxt.binance({**common_cfg, "options": {**common_cfg["options"], "defaultType": "future"}})
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
