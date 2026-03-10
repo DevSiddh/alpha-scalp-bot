@@ -28,7 +28,6 @@ from risk_engine import RiskEngine
 from strategy import ScalpStrategy, Signal
 from telegram_alerts import TelegramAlerts
 
-
 # ---------------------------------------------------------------------------
 # Exchange factory
 # ---------------------------------------------------------------------------
@@ -46,9 +45,8 @@ def _create_exchange() -> ccxt.Exchange:
         }
     )
 
-    if cfg.BINANCE_TESTNET:
-        exchange.set_sandbox_mode(True)
-        logger.info("Exchange: Binance Futures TESTNET (paper trading)")
+    if cfg.BINANCE_DEMO_TRADING:
+        logger.info("Exchange: Binance Futures DEMO (paper trading)")
     else:
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
 
@@ -58,7 +56,6 @@ def _create_exchange() -> ccxt.Exchange:
         "Markets loaded | {} pairs available", len(exchange.markets)
     )
     return exchange
-
 
 # ---------------------------------------------------------------------------
 # OHLCV fetcher (with error classification – Fix 3)
@@ -99,7 +96,6 @@ def fetch_ohlcv(exchange: ccxt.Exchange) -> pd.DataFrame | None:
         logger.error("OHLCV fetch failed (transient): {}", exc)
         return None
 
-
 # ---------------------------------------------------------------------------
 # Midnight detection
 # ---------------------------------------------------------------------------
@@ -107,7 +103,6 @@ def _is_new_utc_day(last_date: str) -> tuple[bool, str]:
     """Check whether we've crossed into a new UTC day."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return today != last_date, today
-
 
 # ---------------------------------------------------------------------------
 # Main async loop
@@ -276,7 +271,6 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
     await alerts.send_shutdown_message(reason="Graceful shutdown (signal)")
     logger.info("Alpha-Scalp Bot stopped.")
 
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -289,7 +283,6 @@ def main() -> None:
     except Exception as exc:
         logger.critical("Fatal error: {}", exc)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
