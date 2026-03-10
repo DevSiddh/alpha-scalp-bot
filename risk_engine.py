@@ -60,9 +60,9 @@ class RiskEngine:
     # Balance helpers
     # -----------------------------------------------------------------
     def _fetch_usdt_balance(self) -> float:
-        """Return total USDT equity from the exchange."""
+        """Return total USDT equity from Binance Futures."""
         try:
-            bal = self.exchange.fetch_balance({"type": "swap"})
+            bal = self.exchange.fetch_balance({"type": "future"})
             total = float(bal.get("total", {}).get("USDT", 0.0))
             logger.debug("Fetched USDT balance: {:.4f}", total)
             return total
@@ -97,12 +97,12 @@ class RiskEngine:
             current_balance = self._fetch_usdt_balance()
         except Exception:
             # If we can't read balance, err on the side of caution
-            logger.warning("Balance read failed – activating kill switch")
+            logger.warning("Balance read failed \u2013 activating kill switch")
             self.kill_switch_active = True
             return True
 
         if self.daily_start_balance <= 0:
-            logger.warning("Daily start balance is zero – activating kill switch")
+            logger.warning("Daily start balance is zero \u2013 activating kill switch")
             self.kill_switch_active = True
             return True
 
@@ -183,7 +183,7 @@ class RiskEngine:
         return round(sl, 2)
 
     def get_take_profit(self, entry_price: float, side: str) -> float:
-        """Return absolute take-profit price (1.0 % from entry – 2:1 R/R)."""
+        """Return absolute take-profit price (1.0 % from entry \u2013 2:1 R/R)."""
         if side.upper() == "BUY":
             tp = entry_price * (1 + self.take_profit_pct)
         else:
