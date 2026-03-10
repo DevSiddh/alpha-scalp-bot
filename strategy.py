@@ -196,7 +196,7 @@ class ScalpStrategy:
         Signal logic
         ------------
         **BUY**  – EMA9 crosses above EMA21 *and* RSI < RSI_OVERSOLD
-                   *and* close <= NW lower band (mean-reversion entry).
+                   *and* close crosses below NW lower band (crossover entry).
 
         **SELL** – EMA9 crosses below EMA21 *and* RSI > RSI_OVERBOUGHT
                    *and* close >= NW upper band.
@@ -241,11 +241,10 @@ class ScalpStrategy:
         # --- Cross detection -------------------------------------------
         cross_above, cross_below = self._detect_cross(ema_fast, ema_slow)
 
-        # --- NW band proximity -----------------------------------------
-        # "near" = within 0.1 % of the band or beyond it
-        nw_band_tolerance = 0.001  # 0.1 %
-        near_lower = curr_close <= curr_nw_lower * (1 + nw_band_tolerance)
-        near_upper = curr_close >= curr_nw_upper * (1 - nw_band_tolerance)
+        # --- NW band CROSSOVER instead of "near" (better timing) ---
+        prev_close = float(close.iloc[-2])
+        long_cross  = (prev_close > curr_nw_lower) and (curr_close <= curr_nw_lower)
+        short_cross = (prev_close < curr_nw_upper) and (curr_close >= curr_nw_upper)
 
         # --- Signal decision -------------------------------------------
         signal = Signal.HOLD
@@ -255,12 +254,12 @@ class ScalpStrategy:
         # BUY conditions
         buy_ema = cross_above
         buy_rsi = curr_rsi < self.rsi_oversold
-        buy_nw = near_lower
+        buy_nw = long_cross
 
         # SELL conditions
         sell_ema = cross_below
         sell_rsi = curr_rsi > self.rsi_overbought
-        sell_nw = near_upper
+        sell_nw = short_cross
 
         if buy_ema and buy_rsi and buy_nw:
             signal = Signal.BUY
@@ -273,7 +272,7 @@ class ScalpStrategy:
             reasons = [
                 f"EMA{self.ema_fast_period} crossed above EMA{self.ema_slow_period}",
                 f"RSI={curr_rsi:.1f} < {self.rsi_oversold} (oversold zone)",
-                f"Price {curr_close:.2f} near/below NW lower {curr_nw_lower:.2f}",
+                f"Price {curr_close:.2f} crossed below NW lower {curr_nw_lower:.2f}",
             ]
 
         elif sell_ema and sell_rsi and sell_nw:
@@ -286,7 +285,7 @@ class ScalpStrategy:
             reasons = [
                 f"EMA{self.ema_fast_period} crossed below EMA{self.ema_slow_period}",
                 f"RSI={curr_rsi:.1f} > {self.rsi_overbought} (overbought zone)",
-                f"Price {curr_close:.2f} near/above NW upper {curr_nw_upper:.2f}",
+                f"Price {curr_close:.2f} crossed above NW upper {curr_nw_upper:.2f}",
             ]
 
         else:
