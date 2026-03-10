@@ -55,15 +55,16 @@ def _create_exchange() -> ccxt.Exchange:
             **common_cfg,
             "options": {**common_cfg["options"], "defaultType": "future"},
         })
-        # Override ONLY fapi (USDT-M futures) endpoints to demo.binance.com
-        # demo.binance.com does NOT support dapi (coin-M) or sapi/papi
-        demo_base = "https://demo.binance.com"
+        # Override ONLY fapi (USDT-M futures) endpoints to Binance's official demo endpoint
+        # Per Binance docs: Futures Demo API Base Endpoint = https://demo-fapi.binance.com
+        demo_fapi_base = "https://demo-fapi.binance.com"
         for key in list(exchange.urls["api"].keys()):
             if key.startswith("fapi"):
                 orig = exchange.urls["api"][key]
+                # Extract path after .com (e.g. /fapi/v1/...)
                 path = orig.split(".com", 1)[-1] if ".com" in orig else ""
-                exchange.urls["api"][key] = demo_base + path
-        logger.info("Exchange: Binance Futures DEMO (demo.binance.com)")
+                exchange.urls["api"][key] = demo_fapi_base + path
+        logger.info("Exchange: Binance Futures DEMO (demo-fapi.binance.com)")
     else:
         exchange = ccxt.binance({**common_cfg, "options": {**common_cfg["options"], "defaultType": "future"}})
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
