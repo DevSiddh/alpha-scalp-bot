@@ -416,55 +416,96 @@ class OrderExecutor:
             return None
 
     # -----------------------------------------------------------------
-    # Close Position
+    # Close Position (enhanced with trade-tracking info)
     # -----------------------------------------------------------------
     def close_position(self, symbol: str) -> dict[str, Any] | None:
         """Close any open position for *symbol*.
 
-        1. Cancel all open orders (SL/TP) for the symbol.
-        2. Detect position side and size.
+        1. Fetch position info BEFORE closing (entry_price, side, size).
+        2. Cancel all open orders (SL/TP) for the symbol.
         3. Place a counter market order to flatten.
+        4. Return enriched dict with entry/exit prices for trade tracking.
         """
         try:
-            self.cancel_all_orders(symbol)
-
+            # Capture position info BEFORE closing
             positions = self.exchange.fetch_positions([symbol])
+            target_pos = None
             for pos in positions:
                 contracts = float(pos.get("contracts", 0))
-                if contracts <= 0:
-                    continue
+                if contracts > 0:
+                    target_pos = pos
+                    break
 
-                pos_side = pos.get("side", "").lower()
-                close_side = "sell" if pos_side == "long" else "buy"
+            if target_pos is None:
+                logger.debug("No open position to close for {}", symbol)
+                return None
 
-                logger.info(
-                    "CLOSING {} position on {} | size={}",
-                    pos_side.upper(),
-                    symbol,
-                    contracts,
-                )
+            entry_price = float(target_pos.get("entryPrice", 0))
+            pos_side = target_pos.get("side", "").lower()
+            contracts = float(target_pos.get("contracts", 0))
+            close_side = "sell" if pos_side == "long" else "buy"
 
-                order = self.exchange.create_order(
-                    symbol=symbol,
-                    type="market",
-                    side=close_side,
-                    amount=contracts,
-                    params={"reduceOnly": True},
-                )
+            # Cancel bracket orders first
+            self.cancel_all_orders(symbol)
 
-                logger.info(
-                    "POSITION CLOSED | id={} | side={} | filled={}",
-                    order.get("id", "unknown"),
-                    close_side,
-                    order.get("filled", 0),
-                )
-                return order
+            logger.info(
+                "CLOSING {} position on {} | size={} | entry={:.2f}",
+                pos_side.upper(),
+                symbol,
+                contracts,
+                entry_price,
+            )
 
-            logger.debug("No open position to close for {}", symbol)
-            return None
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type="market",
+                side=close_side,
+                amount=contracts,
+                params={"reduceOnly": True},
+            )
+
+            exit_price = float(order.get("average") or order.get("price", 0))
+
+            logger.info(
+                "POSITION CLOSED | id={} | side={} | filled={} | exit={:.2f}",
+                order.get("id", "unknown"),
+                close_side,
+                order.get("filled", 0),
+                exit_price,
+            )
+
+            # Enrich order with tracking info
+            order["_entry_price"] = entry_price
+            order["_exit_price"] = exit_price
+            order["_side"] = pos_side  # "long" or "short"
+            order["_size"] = contracts
+            order["_symbol"] = symbol
+            return order
 
         except Exception as exc:
             self._handle_exchange_error(exc, f"close_position {symbol}")
+            return None
+
+    # -----------------------------------------------------------------
+    # Detect SL/TP fills (position monitor)
+    # -----------------------------------------------------------------
+    def get_position_info(self, symbol: str) -> dict[str, Any] | None:
+        """Fetch current position info for a symbol. Returns None if no position."""
+        try:
+            positions = self.exchange.fetch_positions([symbol])
+            for pos in positions:
+                contracts = float(pos.get("contracts", 0))
+                if contracts > 0:
+                    return {
+                        "symbol": symbol,
+                        "side": pos.get("side", "unknown").lower(),
+                        "contracts": contracts,
+                        "entry_price": float(pos.get("entryPrice", 0)),
+                        "unrealized_pnl": float(pos.get("unrealizedPnl", 0)),
+                    }
+            return None
+        except Exception as exc:
+            logger.error("Failed to fetch position info for {}: {}", symbol, exc)
             return None
 
     # -----------------------------------------------------------------
