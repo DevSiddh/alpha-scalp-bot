@@ -1,0 +1,10 @@
+# Alpha-Scalp Bot – Python dependencies
+# Install: pip install -r requirements.txt
+
+ccxt>=4.0.0
+pandas>=2.0.0
+pandas-ta>=0.3.14b
+numpy>=1.24.0
+loguru>=0.7.0
+python-dotenv>=1.0.0
+httpx>=0.25.0
