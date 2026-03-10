@@ -46,15 +46,17 @@ def _create_exchange() -> ccxt.Exchange:
     )
 
     if cfg.BINANCE_DEMO_TRADING:
-        # Binance demo/testnet – uses testnet endpoint
-        exchange.set_sandbox_mode(True)
-        exchange.urls["api"] = {
-            "public": "https://testnet.binancefuture.com/fapi/v1",
-            "private": "https://testnet.binancefuture.com/fapi/v1",
-            "fapiPublic": "https://testnet.binancefuture.com/fapi/v1",
-            "fapiPrivate": "https://testnet.binancefuture.com/fapi/v1",
-        }
-        logger.info("Exchange: Binance Futures DEMO (testnet)")
+        # Binance Futures testnet — surgically override only futures endpoints
+        testnet = "https://testnet.binancefuture.com"
+        for key in list(exchange.urls.get("api", {}).keys()):
+            if "fapi" in key.lower():
+                exchange.urls["api"][key] = testnet + "/fapi/v1"
+        # Also override v2 endpoints if present
+        if "fapiPrivateV2" in exchange.urls.get("api", {}):
+            exchange.urls["api"]["fapiPrivateV2"] = testnet + "/fapi/v2"
+        if "fapiPublicV2" in exchange.urls.get("api", {}):
+            exchange.urls["api"]["fapiPublicV2"] = testnet + "/fapi/v2"
+        logger.info("Exchange: Binance Futures TESTNET")
     else:
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
 
