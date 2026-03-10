@@ -37,7 +37,7 @@ class TelegramAlerts:
 
         if not self.enabled:
             logger.warning(
-                "Telegram alerts DISABLED – bot_token or chat_id missing"
+                "Telegram alerts DISABLED \u2013 bot_token or chat_id missing"
             )
         else:
             logger.info("TelegramAlerts initialised | chat_id={}", self.chat_id)
@@ -51,7 +51,7 @@ class TelegramAlerts:
         Returns *True* on success, *False* on failure.
         """
         if not self.enabled:
-            logger.debug("Telegram disabled – message suppressed")
+            logger.debug("Telegram disabled \u2013 message suppressed")
             return False
 
         url = f"{_TG_API}/bot{self.bot_token}/sendMessage"
@@ -107,7 +107,7 @@ class TelegramAlerts:
             f"TP     : <code>{tp:,.2f}</code>\n"
             f"R/R    : <code>{risk_reward:.1f}:1</code>\n"
             f"\n"
-            f"<i>#{symbol.replace('/', '').replace(':', '')} #scalp</i>"
+            f"<i>#{symbol.replace('/', '')} #Binance #scalp</i>"
         )
         return await self.send_message(text)
 
@@ -182,10 +182,11 @@ class TelegramAlerts:
     async def send_startup_message(self) -> bool:
         """Announce that the bot has started."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        mode = "TESTNET (Paper)" if cfg.BYBIT_TESTNET else "LIVE"
+        mode = "TESTNET (Paper)" if cfg.BINANCE_TESTNET else "LIVE"
         text = (
             f"<b>[START] Alpha-Scalp Bot Online</b>\n"
             f"\n"
+            f"Exchange : <code>Binance Futures</code>\n"
             f"Mode     : <code>{mode}</code>\n"
             f"Symbol   : <code>{cfg.SYMBOL}</code>\n"
             f"TF       : <code>{cfg.TIMEFRAME}</code>\n"
