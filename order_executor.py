@@ -1,8 +1,8 @@
-"""Alpha-Scalp Bot – Order Execution Module.
+"""Alpha-Scalp Bot – Order Execution Module (Binance Futures).
 
-Wraps CCXT calls to Bybit Futures for:
-- Setting leverage
-- Opening positions with market orders + SL/TP
+Wraps CCXT calls to Binance Futures for:
+- Setting leverage and margin type
+- Opening positions with market orders + separate SL/TP bracket orders
 - Closing positions
 - Querying open positions
 - Cancelling pending orders
@@ -15,14 +15,14 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 import config as cfg
-from risk_engine import RiskEngine
 
 if TYPE_CHECKING:
     import ccxt
+    from risk_engine import RiskEngine
 
 
 class OrderExecutor:
-    """Handles all order lifecycle operations on Bybit via CCXT."""
+    """Handles all order lifecycle operations on Binance Futures via CCXT."""
 
     # -----------------------------------------------------------------
     # Lifecycle
@@ -42,28 +42,51 @@ class OrderExecutor:
         )
 
     # -----------------------------------------------------------------
+    # Margin Type
+    # -----------------------------------------------------------------
+    def set_margin_type(self, symbol: str | None = None) -> bool:
+        """Set ISOLATED margin mode for *symbol* on Binance Futures.
+
+        Returns *True* on success (or already set), *False* on failure.
+        """
+        symbol = symbol or self.symbol
+        try:
+            self.exchange.set_margin_mode("isolated", symbol)
+            logger.info("Margin mode set to ISOLATED for {}", symbol)
+            return True
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            # Binance returns an error if margin type is already set
+            if "no need to change" in err_msg or "already" in err_msg:
+                logger.debug("Margin mode already ISOLATED for {} \u2013 no change needed", symbol)
+                return True
+            logger.error("Failed to set margin mode for {}: {}", symbol, exc)
+            return False
+
+    # -----------------------------------------------------------------
     # Leverage
     # -----------------------------------------------------------------
-    def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Set leverage for *symbol* on Bybit.
+    def set_leverage(self, symbol: str | None = None, leverage: int | None = None) -> bool:
+        """Set leverage for *symbol* on Binance Futures.
 
         Returns *True* on success, *False* on failure.
         """
+        symbol = symbol or self.symbol
+        leverage = leverage or self.risk.leverage
         try:
             self.exchange.set_leverage(leverage, symbol)
             logger.info("Leverage set to {}x for {}", leverage, symbol)
             return True
         except Exception as exc:
-            # Some exchanges silently accept if leverage is already set
             err_msg = str(exc).lower()
-            if "not modified" in err_msg or "same leverage" in err_msg:
-                logger.debug("Leverage already {}x for {} – no change needed", leverage, symbol)
+            if "no need to change" in err_msg or "same leverage" in err_msg:
+                logger.debug("Leverage already {}x for {} \u2013 no change needed", leverage, symbol)
                 return True
             logger.error("Failed to set leverage for {}: {}", symbol, exc)
             return False
 
     # -----------------------------------------------------------------
-    # Open Position
+    # Open Position (with separate SL + TP bracket orders)
     # -----------------------------------------------------------------
     def open_position(
         self,
@@ -73,20 +96,24 @@ class OrderExecutor:
         stop_loss: float,
         take_profit: float,
     ) -> dict[str, Any] | None:
-        """Place a market order with attached stop-loss and take-profit.
+        """Place a market order with separate STOP_MARKET and TAKE_PROFIT_MARKET orders.
+
+        Binance Futures does not support SL/TP as params on the market order
+        itself, so we place them as independent conditional orders with
+        ``closePosition=True``.
 
         Parameters
         ----------
         symbol : str
-            Trading pair, e.g. ``"BTC/USDT:USDT"``.
+            Trading pair, e.g. ``"BTC/USDT"``.
         side : str
             ``"buy"`` or ``"sell"``.
         amount : float
             Position size in base currency units.
         stop_loss : float
-            Absolute stop-loss price.
+            Absolute stop-loss trigger price.
         take_profit : float
-            Absolute take-profit price.
+            Absolute take-profit trigger price.
 
         Returns
         -------
@@ -94,29 +121,16 @@ class OrderExecutor:
             CCXT order response on success, ``None`` on failure.
         """
         try:
-            # Ensure leverage is set before placing the order
-            self.set_leverage(symbol, self.risk.leverage)
-
             # Round amount to exchange precision
             market = self.exchange.market(symbol)
             amount = self.exchange.amount_to_precision(symbol, amount)
             amount_float = float(amount)
 
             if amount_float <= 0:
-                logger.warning("Calculated amount is 0 – skipping order")
+                logger.warning("Calculated amount is 0 \u2013 skipping order")
                 return None
 
-            # Build SL / TP params for Bybit
-            params: dict[str, Any] = {
-                "stopLoss": {
-                    "type": "market",
-                    "triggerPrice": stop_loss,
-                },
-                "takeProfit": {
-                    "type": "market",
-                    "triggerPrice": take_profit,
-                },
-            }
+            opposite_side = "sell" if side.lower() == "buy" else "buy"
 
             logger.info(
                 "OPENING {} {} | size={} | SL={:.2f} | TP={:.2f}",
@@ -127,25 +141,73 @@ class OrderExecutor:
                 take_profit,
             )
 
-            order = self.exchange.create_order(
+            # 1) Place market entry order
+            order = self.exchange.create_market_order(
                 symbol=symbol,
-                type=self.order_type,
                 side=side.lower(),
                 amount=amount_float,
-                params=params,
             )
 
             order_id = order.get("id", "unknown")
             avg_price = order.get("average") or order.get("price", 0)
             filled = order.get("filled", 0)
 
+            # Use fill price for bracket orders if available
+            entry_price = float(avg_price) if avg_price else stop_loss
+
             logger.info(
-                "ORDER FILLED | id={} | side={} | filled={} @ {:.2f} | "
-                "SL={:.2f} | TP={:.2f}",
+                "ENTRY FILLED | id={} | side={} | filled={} @ {:.2f}",
                 order_id,
                 side.upper(),
                 filled,
-                float(avg_price or 0),
+                entry_price,
+            )
+
+            # 2) Place stop-loss (STOP_MARKET) \u2013 closes entire position
+            try:
+                sl_order = self.exchange.create_order(
+                    symbol=symbol,
+                    type="STOP_MARKET",
+                    side=opposite_side,
+                    amount=amount_float,
+                    price=None,
+                    params={
+                        "stopPrice": self.exchange.price_to_precision(symbol, stop_loss),
+                        "closePosition": True,
+                    },
+                )
+                logger.info(
+                    "SL ORDER placed | id={} | trigger={:.2f}",
+                    sl_order.get("id", "unknown"),
+                    stop_loss,
+                )
+            except Exception as sl_exc:
+                logger.error("Failed to place SL order: {}", sl_exc)
+
+            # 3) Place take-profit (TAKE_PROFIT_MARKET) \u2013 closes entire position
+            try:
+                tp_order = self.exchange.create_order(
+                    symbol=symbol,
+                    type="TAKE_PROFIT_MARKET",
+                    side=opposite_side,
+                    amount=amount_float,
+                    price=None,
+                    params={
+                        "stopPrice": self.exchange.price_to_precision(symbol, take_profit),
+                        "closePosition": True,
+                    },
+                )
+                logger.info(
+                    "TP ORDER placed | id={} | trigger={:.2f}",
+                    tp_order.get("id", "unknown"),
+                    take_profit,
+                )
+            except Exception as tp_exc:
+                logger.error("Failed to place TP order: {}", tp_exc)
+
+            logger.info(
+                "BRACKET COMPLETE | entry={:.2f} | SL={:.2f} | TP={:.2f}",
+                entry_price,
                 stop_loss,
                 take_profit,
             )
@@ -168,8 +230,9 @@ class OrderExecutor:
     def close_position(self, symbol: str) -> dict[str, Any] | None:
         """Close any open position for *symbol*.
 
-        Detects side and size from open positions, then submits a
-        counter-order to flatten.
+        1. Cancel all open orders (SL/TP) for the symbol.
+        2. Detect position side and size.
+        3. Place a counter market order to flatten.
 
         Returns
         -------
@@ -177,6 +240,9 @@ class OrderExecutor:
             CCXT order response, or ``None`` if nothing to close.
         """
         try:
+            # Cancel all conditional orders first (SL/TP)
+            self.cancel_all_orders(symbol)
+
             positions = self.exchange.fetch_positions([symbol])
             for pos in positions:
                 contracts = float(pos.get("contracts", 0))
@@ -223,7 +289,7 @@ class OrderExecutor:
         """Return a list of open positions for *symbol*.
 
         Each dict contains at minimum: ``side``, ``contracts``,
-        ``entryPrice``, ``unrealizedPnl``.
+        ``entry_price``, ``unrealized_pnl``.
         """
         try:
             positions = self.exchange.fetch_positions([symbol])
