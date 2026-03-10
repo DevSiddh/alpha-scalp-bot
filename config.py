@@ -102,6 +102,30 @@ NW_BANDWIDTH: float = _env("NW_BANDWIDTH", "8.0", cast=float)
 NW_MULT: float = _env("NW_MULT", "2.0", cast=float)
 NW_LOOKBACK: int = _env("NW_LOOKBACK", "50", cast=int)
 
+# ===== PREMIUM: Volume Spike Filter =========================================
+VOL_SMA_PERIOD: int = _env("VOL_SMA_PERIOD", "20", cast=int)
+VOL_SPIKE_MULT: float = _env("VOL_SPIKE_MULT", "1.5", cast=float)
+
+# ===== PREMIUM: Bollinger Band Squeeze ======================================
+BB_PERIOD: int = _env("BB_PERIOD", "20", cast=int)
+BB_STD: float = _env("BB_STD", "2.0", cast=float)
+BB_SQUEEZE_THRESHOLD: float = _env("BB_SQUEEZE_THRESHOLD", "0.02", cast=float)
+
+# ===== PREMIUM: ADX Regime Detection ========================================
+ADX_PERIOD: int = _env("ADX_PERIOD", "14", cast=int)
+ADX_TREND_THRESHOLD: float = _env("ADX_TREND_THRESHOLD", "25.0", cast=float)
+ADX_STRONG_TREND: float = _env("ADX_STRONG_TREND", "40.0", cast=float)
+
+# ===== PREMIUM: Scalp ATR Trailing Stop =====================================
+SCALP_TRAIL_ACTIVATE_PCT: float = _env("SCALP_TRAIL_ACTIVATE_PCT", "0.004", cast=float)
+SCALP_TRAIL_ATR_MULT: float = _env("SCALP_TRAIL_ATR_MULT", "1.0", cast=float)
+
+# ===== PREMIUM: Concurrent Trade Limiter ====================================
+MAX_CONCURRENT_TRADES: int = _env("MAX_CONCURRENT_TRADES", "3", cast=int)
+
+# ===== PREMIUM: Daily P&L Circuit Breaker ===================================
+DAILY_LOSS_LIMIT: float = _env("DAILY_LOSS_LIMIT", "0.03", cast=float)
+
 # ===== Scalp ATR-based SL/TP ================================================
 SCALP_SL_USE_ATR: bool = _env("SCALP_SL_USE_ATR", "false", cast=bool)
 SCALP_SL_ATR_PERIOD: int = _env("SCALP_SL_ATR_PERIOD", "14", cast=int)
@@ -179,7 +203,7 @@ logger.add(
 # Startup banner
 # ---------------------------------------------------------------------------
 logger.info("=" * 60)
-logger.info("Alpha-Scalp Bot | Binance Futures | config loaded")
+logger.info("Alpha-Scalp Bot PREMIUM | Binance Futures | config loaded")
 logger.info(f"Symbol       : {SYMBOL}")
 logger.info(f"Timeframe    : {TIMEFRAME}")
 logger.info(f"Demo Trading : {BINANCE_DEMO_TRADING}")
@@ -190,6 +214,12 @@ logger.info(f"SL / TP      : {STOP_LOSS_PCT:.2%} / {TAKE_PROFIT_PCT:.2%}")
 logger.info(f"NW Envelope  : bw={NW_BANDWIDTH}, mult={NW_MULT}, lb={NW_LOOKBACK}")
 logger.info(f"ATR SL (scalp): {'ON' if SCALP_SL_USE_ATR else 'OFF'} (period={SCALP_SL_ATR_PERIOD}, SL mult={SCALP_SL_ATR_MULTIPLIER}, TP mult={SCALP_TP_ATR_MULTIPLIER})")
 logger.info(f"TF Presets   : {'ON' if SCALP_USE_TF_PRESETS else 'OFF'}")
+logger.info(f"Vol Filter   : SMA={VOL_SMA_PERIOD}, spike={VOL_SPIKE_MULT}x")
+logger.info(f"BB Squeeze   : period={BB_PERIOD}, std={BB_STD}, threshold={BB_SQUEEZE_THRESHOLD:.2%}")
+logger.info(f"ADX Regime   : period={ADX_PERIOD}, trend>{ADX_TREND_THRESHOLD}, strong>{ADX_STRONG_TREND}")
+logger.info(f"Scalp Trail  : activate={SCALP_TRAIL_ACTIVATE_PCT:.2%}, ATR mult={SCALP_TRAIL_ATR_MULT}")
+logger.info(f"Concurrent   : max {MAX_CONCURRENT_TRADES} trades")
+logger.info(f"Circuit Break: {DAILY_LOSS_LIMIT:.1%} daily loss limit")
 if SWING_ENABLED:
     logger.info(f"Swing Mode   : ENABLED")
     logger.info(f"Swing Symbols: {SWING_SYMBOLS}")
