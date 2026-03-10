@@ -225,8 +225,14 @@ class ScalpStrategy:
         ema_slow = ta.ema(close, length=self.ema_slow_period)
         rsi = ta.rsi(close, length=self.rsi_period)
 
+        # --- Adaptive NW bandwidth via ATR --------------------------------
+        atr = ta.atr(df['high'], df['low'], df['close'], length=14)
+        curr_atr = float(atr.iloc[-1]) if not pd.isna(atr.iloc[-1]) else 100.0
+        dynamic_mult = max(0.5, min(2.5, curr_atr / 200.0))  # normalize around ~200$ ATR
+        effective_mult = self.nw_mult * dynamic_mult
+
         nw_mid, nw_upper, nw_lower = self.nadaraya_watson_envelope(
-            close.values, self.nw_bandwidth, self.nw_mult, self.nw_lookback
+            close.values, self.nw_bandwidth, effective_mult, self.nw_lookback
         )
 
         # Latest values
