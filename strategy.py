@@ -195,10 +195,10 @@ class ScalpStrategy:
 
         Signal logic
         ------------
-        **BUY**  – EMA9 crosses above EMA21 *and* RSI < 35
+        **BUY**  – EMA9 crosses above EMA21 *and* RSI < RSI_OVERSOLD
                    *and* close <= NW lower band (mean-reversion entry).
 
-        **SELL** – EMA9 crosses below EMA21 *and* RSI > 65
+        **SELL** – EMA9 crosses below EMA21 *and* RSI > RSI_OVERBOUGHT
                    *and* close >= NW upper band.
 
         Otherwise **HOLD**.
@@ -254,43 +254,43 @@ class ScalpStrategy:
 
         # BUY conditions
         buy_ema = cross_above
-        buy_rsi = curr_rsi < 35
+        buy_rsi = curr_rsi < self.rsi_oversold
         buy_nw = near_lower
 
         # SELL conditions
         sell_ema = cross_below
-        sell_rsi = curr_rsi > 65
+        sell_rsi = curr_rsi > self.rsi_overbought
         sell_nw = near_upper
 
         if buy_ema and buy_rsi and buy_nw:
             signal = Signal.BUY
             # Confidence: average of component strengths
-            rsi_strength = (35 - curr_rsi) / 35  # stronger when lower
+            rsi_strength = (self.rsi_oversold - curr_rsi) / self.rsi_oversold  # stronger when lower
             nw_strength = max(
                 0, (curr_nw_lower - curr_close) / (curr_nw_upper - curr_nw_lower + 1e-9)
             )
             confidence = min(1.0, 0.4 + 0.3 * rsi_strength + 0.3 * nw_strength)
             reasons = [
                 f"EMA{self.ema_fast_period} crossed above EMA{self.ema_slow_period}",
-                f"RSI={curr_rsi:.1f} < 35 (oversold zone)",
+                f"RSI={curr_rsi:.1f} < {self.rsi_oversold} (oversold zone)",
                 f"Price {curr_close:.2f} near/below NW lower {curr_nw_lower:.2f}",
             ]
 
         elif sell_ema and sell_rsi and sell_nw:
             signal = Signal.SELL
-            rsi_strength = (curr_rsi - 65) / 35
+            rsi_strength = (curr_rsi - self.rsi_overbought) / (100 - self.rsi_overbought)
             nw_strength = max(
                 0, (curr_close - curr_nw_upper) / (curr_nw_upper - curr_nw_lower + 1e-9)
             )
             confidence = min(1.0, 0.4 + 0.3 * rsi_strength + 0.3 * nw_strength)
             reasons = [
                 f"EMA{self.ema_fast_period} crossed below EMA{self.ema_slow_period}",
-                f"RSI={curr_rsi:.1f} > 65 (overbought zone)",
+                f"RSI={curr_rsi:.1f} > {self.rsi_overbought} (overbought zone)",
                 f"Price {curr_close:.2f} near/above NW upper {curr_nw_upper:.2f}",
             ]
 
         else:
-            reasons = ["No confluence \u2013 HOLD"]
+            reasons = ["No confluence – HOLD"]
 
         reason_str = " | ".join(reasons)
 
