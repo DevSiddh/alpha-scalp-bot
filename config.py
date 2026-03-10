@@ -115,6 +115,7 @@ BB_SQUEEZE_THRESHOLD: float = _env("BB_SQUEEZE_THRESHOLD", "0.02", cast=float)
 ADX_PERIOD: int = _env("ADX_PERIOD", "14", cast=int)
 ADX_TREND_THRESHOLD: float = _env("ADX_TREND_THRESHOLD", "25.0", cast=float)
 ADX_STRONG_TREND: float = _env("ADX_STRONG_TREND", "40.0", cast=float)
+ADX_RANGE_THRESHOLD: float = _env("ADX_RANGE_THRESHOLD", "20.0", cast=float)
 
 # ===== PREMIUM: Scalp ATR Trailing Stop =====================================
 SCALP_TRAIL_ACTIVATE_PCT: float = _env("SCALP_TRAIL_ACTIVATE_PCT", "0.004", cast=float)
