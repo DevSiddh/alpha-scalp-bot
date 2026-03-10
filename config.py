@@ -1,7 +1,7 @@
 """Alpha-Scalp Bot Configuration Module.
 
 Loads all configuration from environment variables (.env file)
-with sensible defaults for paper trading on Bybit testnet.
+with sensible defaults for paper trading on Binance Futures testnet.
 """
 
 from __future__ import annotations
@@ -30,16 +30,16 @@ def _env(key: str, default: str | None = None, cast: type = str):
 
 
 # ===== Exchange Credentials =================================================
-BYBIT_API_KEY: str = _env("BYBIT_API_KEY", "")
-BYBIT_API_SECRET: str = _env("BYBIT_API_SECRET", "")
-BYBIT_TESTNET: bool = _env("BYBIT_TESTNET", "true", cast=bool)
+BINANCE_API_KEY: str = _env("BINANCE_API_KEY", "")
+BINANCE_SECRET: str = _env("BINANCE_SECRET", "")
+BINANCE_TESTNET: bool = _env("BINANCE_TESTNET", "true", cast=bool)
 
 # ===== Telegram Alerts ======================================================
 TELEGRAM_BOT_TOKEN: str = _env("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = _env("TELEGRAM_CHAT_ID", "")
 
 # ===== Trading Pair & Timeframe =============================================
-SYMBOL: str = _env("SYMBOL", "BTC/USDT:USDT")  # Bybit linear perpetual
+SYMBOL: str = _env("SYMBOL", "BTC/USDT")  # Binance Futures (CCXT unified)
 TIMEFRAME: str = _env("TIMEFRAME", "1m")          # 1-minute candles for scalping
 LOOKBACK_CANDLES: int = _env("LOOKBACK_CANDLES", "200", cast=int)
 
@@ -94,10 +94,10 @@ logger.add(
 # Startup banner (logged once on import)
 # ---------------------------------------------------------------------------
 logger.info("=" * 60)
-logger.info("Alpha-Scalp Bot | config loaded")
+logger.info("Alpha-Scalp Bot | Binance Futures | config loaded")
 logger.info(f"Symbol       : {SYMBOL}")
 logger.info(f"Timeframe    : {TIMEFRAME}")
-logger.info(f"Testnet      : {BYBIT_TESTNET}")
+logger.info(f"Testnet      : {BINANCE_TESTNET}")
 logger.info(f"Leverage     : {LEVERAGE}x")
 logger.info(f"Risk / Trade : {RISK_PER_TRADE:.1%}")
 logger.info(f"Daily DD Cap : {DAILY_DRAWDOWN_LIMIT:.1%}")
