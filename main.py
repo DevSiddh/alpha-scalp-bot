@@ -5,6 +5,7 @@ Orchestrates the full scalping loop:
 2. Continuously fetch candles, generate signals, execute trades
 3. Enforce kill-switch and daily reset at UTC midnight
 4. Graceful shutdown on SIGINT / SIGTERM
+5. Fatal error classification – auto-shutdown on auth/permission errors
 
 Usage:
     python main.py
@@ -22,7 +23,7 @@ import pandas as pd
 from loguru import logger
 
 import config as cfg
-from order_executor import OrderExecutor
+from order_executor import FatalExchangeError, OrderExecutor
 from risk_engine import RiskEngine
 from strategy import ScalpStrategy, Signal
 from telegram_alerts import TelegramAlerts
@@ -49,7 +50,7 @@ def _create_exchange() -> ccxt.Exchange:
         exchange.set_sandbox_mode(True)
         logger.info("Exchange: Binance Futures TESTNET (paper trading)")
     else:
-        logger.warning("Exchange: Binance Futures LIVE \u2013 real funds at risk")
+        logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
 
     # Verify connectivity
     exchange.load_markets()
@@ -60,10 +61,14 @@ def _create_exchange() -> ccxt.Exchange:
 
 
 # ---------------------------------------------------------------------------
-# OHLCV fetcher
+# OHLCV fetcher (with error classification – Fix 3)
 # ---------------------------------------------------------------------------
 def fetch_ohlcv(exchange: ccxt.Exchange) -> pd.DataFrame | None:
-    """Fetch recent OHLCV candles and return a DataFrame."""
+    """Fetch recent OHLCV candles and return a DataFrame.
+
+    Raises FatalExchangeError on auth/permission failures so the main
+    loop can distinguish retryable errors from shutdown-worthy ones.
+    """
     try:
         raw = exchange.fetch_ohlcv(
             cfg.SYMBOL, cfg.TIMEFRAME, limit=cfg.LOOKBACK_CANDLES
@@ -84,8 +89,14 @@ def fetch_ohlcv(exchange: ccxt.Exchange) -> pd.DataFrame | None:
         )
         return df
 
+    except (ccxt.AuthenticationError, ccxt.AccountNotEnabled, ccxt.PermissionDenied) as exc:
+        logger.critical("FATAL: OHLCV fetch hit auth error – {}", exc)
+        raise FatalExchangeError(f"Auth error in fetch_ohlcv: {exc}") from exc
+    except ccxt.ExchangeNotAvailable as exc:
+        logger.critical("FATAL: Exchange unavailable (maintenance/IP ban) – {}", exc)
+        raise FatalExchangeError(f"Exchange unavailable: {exc}") from exc
     except Exception as exc:
-        logger.error("OHLCV fetch failed: {}", exc)
+        logger.error("OHLCV fetch failed (transient): {}", exc)
         return None
 
 
@@ -101,7 +112,7 @@ def _is_new_utc_day(last_date: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Main async loop
 # ---------------------------------------------------------------------------
-async def run_bot() -> None:  # noqa: C901 \u2013 intentionally cohesive
+async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
     """Core trading loop."""
 
     # --- Initialisation ---------------------------------------------------
@@ -124,7 +135,7 @@ async def run_bot() -> None:  # noqa: C901 \u2013 intentionally cohesive
 
     # Send startup alert
     await alerts.send_startup_message()
-    logger.info("Bot started \u2013 entering main loop")
+    logger.info("Bot started – entering main loop")
 
     # Track current UTC date for midnight reset
     current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -134,7 +145,7 @@ async def run_bot() -> None:  # noqa: C901 \u2013 intentionally cohesive
 
     def _handle_signal(sig: int, _frame) -> None:
         sig_name = signal.Signals(sig).name
-        logger.warning("Received {} \u2013 initiating graceful shutdown", sig_name)
+        logger.warning("Received {} – initiating graceful shutdown", sig_name)
         shutdown_event.set()
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -146,7 +157,7 @@ async def run_bot() -> None:  # noqa: C901 \u2013 intentionally cohesive
             # 1. Midnight reset
             is_new_day, today = _is_new_utc_day(current_date)
             if is_new_day:
-                logger.info("UTC midnight crossed \u2013 resetting daily stats")
+                logger.info("UTC midnight crossed – resetting daily stats")
                 summary = risk.reset_daily()
                 await alerts.send_daily_summary(
                     pnl=summary["pnl"],
@@ -157,13 +168,13 @@ async def run_bot() -> None:  # noqa: C901 \u2013 intentionally cohesive
                 )
                 current_date = today
 
-            # 2. Kill switch
+            # 2. Kill switch (also refreshes balance cache for this loop)
             if risk.check_kill_switch():
                 if not getattr(run_bot, "_ks_alerted", False):
                     await alerts.send_kill_switch_alert()
                     run_bot._ks_alerted = True  # type: ignore[attr-defined]
                 logger.warning(
-                    "Kill switch active \u2013 sleeping {} s", cfg.LOOP_INTERVAL * 12
+                    "Kill switch active – sleeping {} s", cfg.LOOP_INTERVAL * 12
                 )
                 await asyncio.sleep(cfg.LOOP_INTERVAL * 12)  # back off
                 continue
@@ -173,7 +184,7 @@ async def run_bot() -> None:  # noqa: C901 \u2013 intentionally cohesive
             # 3. Fetch candles
             df = fetch_ohlcv(exchange)
             if df is None or df.empty:
-                logger.warning("No candle data \u2013 retrying in {} s", cfg.LOOP_INTERVAL)
+                logger.warning("No candle data – retrying in {} s", cfg.LOOP_INTERVAL)
                 await asyncio.sleep(cfg.LOOP_INTERVAL)
                 continue
 
@@ -185,7 +196,7 @@ async def run_bot() -> None:  # noqa: C901 \u2013 intentionally cohesive
                 # Check if we can open a new position
                 can_trade = risk.check_max_positions()
                 if not can_trade:
-                    logger.info("Max positions reached \u2013 skipping signal")
+                    logger.info("Max positions reached – skipping signal")
                 else:
                     side = trade_signal.signal.value.lower()  # "buy" / "sell"
                     entry = trade_signal.entry_price
@@ -210,24 +221,37 @@ async def run_bot() -> None:  # noqa: C901 \u2013 intentionally cohesive
                             amount=size,
                             stop_loss=sl,
                             take_profit=tp,
+                            expected_entry=entry,  # Fix 1: slippage check
                         )
 
+                        # Invalidate balance cache after trade execution
+                        risk.invalidate_balance_cache()
+
                         if order:
-                            filled_price = float(
-                                order.get("average")
-                                or order.get("price")
-                                or entry
-                            )
+                            fill_price = float(order.get("_fill_price", entry))
+                            actual_sl = float(order.get("_actual_sl", sl))
+                            actual_tp = float(order.get("_actual_tp", tp))
                             await alerts.send_trade_alert(
                                 side=side,
                                 symbol=cfg.SYMBOL,
-                                entry=filled_price,
-                                sl=sl,
-                                tp=tp,
+                                entry=fill_price,
+                                sl=actual_sl,
+                                tp=actual_tp,
                                 size=size,
                             )
+                        else:
+                            logger.warning(
+                                "Order returned None – slippage reject or bracket failure"
+                            )
                     else:
-                        logger.warning("Position size is 0 \u2013 skipping")
+                        logger.warning("Position size is 0 – skipping")
+
+        # --- Fix 3: Fatal error = shutdown, transient = retry ---
+        except FatalExchangeError as exc:
+            logger.critical("FATAL ERROR – shutting down: {}", exc)
+            await alerts.send_error_alert(f"FATAL: {exc}")
+            shutdown_event.set()
+            break
 
         except Exception as exc:
             logger.exception("Unhandled error in main loop: {}", exc)
@@ -239,10 +263,10 @@ async def run_bot() -> None:  # noqa: C901 \u2013 intentionally cohesive
                 shutdown_event.wait(), timeout=cfg.LOOP_INTERVAL
             )
         except asyncio.TimeoutError:
-            pass  # normal \u2013 just loop again
+            pass  # normal – just loop again
 
     # --- Graceful shutdown ------------------------------------------------
-    logger.info("Shutting down \u2013 closing open positions...")
+    logger.info("Shutting down – closing open positions...")
     try:
         executor.close_position(cfg.SYMBOL)
         executor.cancel_all_orders(cfg.SYMBOL)
@@ -261,7 +285,7 @@ def main() -> None:
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt \u2013 exiting")
+        logger.info("KeyboardInterrupt – exiting")
     except Exception as exc:
         logger.critical("Fatal error: {}", exc)
         sys.exit(1)
