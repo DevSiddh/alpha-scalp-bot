@@ -49,13 +49,27 @@ def _create_exchange() -> ccxt.Exchange:
     }
 
     if cfg.BINANCE_DEMO_TRADING:
-        # Binance Futures demo trading (testnet/sandbox deprecated for futures)
-        # Uses Binance's portfolio-margin demo environment
+        # Binance Futures demo trading via demo.binance.com
+        # CCXT has no built-in demo support for Binance, so we override URLs manually
         exchange = ccxt.binance({
             **common_cfg,
-            "options": {**common_cfg["options"], "defaultType": "future", "demo": True},
+            "options": {**common_cfg["options"], "defaultType": "future"},
         })
-        logger.info("Exchange: Binance Futures DEMO (paper)")
+        # Override futures API endpoints to demo.binance.com
+        demo_base = "https://demo.binance.com"
+        for key in list(exchange.urls["api"].keys()):
+            if key.startswith("fapi") or key.startswith("dapi"):
+                orig = exchange.urls["api"][key]
+                # Replace the host portion, keep the path
+                path = orig.split(".com", 1)[-1] if ".com" in orig else ""
+                exchange.urls["api"][key] = demo_base + path
+        # Also override sapi/papi for account endpoints
+        for key in ["sapi", "papi"]:
+            if key in exchange.urls["api"]:
+                orig = exchange.urls["api"][key]
+                path = orig.split(".com", 1)[-1] if ".com" in orig else ""
+                exchange.urls["api"][key] = demo_base + path
+        logger.info("Exchange: Binance Futures DEMO (demo.binance.com)")
     else:
         exchange = ccxt.binance({**common_cfg, "options": {**common_cfg["options"], "defaultType": "future"}})
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
