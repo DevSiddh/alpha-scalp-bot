@@ -24,7 +24,7 @@ import config as cfg
 _TG_API = "https://api.telegram.org"
 
 
-class TelegramAlerter:
+class TelegramAlerts:
     """Async Telegram alert sender with rate-limit guard."""
 
     def __init__(self) -> None:
