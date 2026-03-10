@@ -3,6 +3,9 @@
 Wraps CCXT calls to Binance Futures for:
 - Setting leverage and margin type
 - Opening positions with market orders + separate SL/TP bracket orders
+- Slippage enforcement after market fills
+- Atomic bracket rollback on partial SL/TP failure
+- Error classification (auth vs transient)
 - Closing positions
 - Querying open positions
 - Cancelling pending orders
@@ -12,13 +15,24 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import ccxt
 from loguru import logger
 
 import config as cfg
 
 if TYPE_CHECKING:
-    import ccxt
     from risk_engine import RiskEngine
+
+
+# ---------------------------------------------------------------------------
+# Custom exception for fatal auth errors
+# ---------------------------------------------------------------------------
+class FatalExchangeError(Exception):
+    """Raised on unrecoverable exchange errors (auth, IP ban, etc.).
+
+    The main loop should catch this and shut down instead of retrying.
+    """
+    pass
 
 
 class OrderExecutor:
@@ -42,13 +56,62 @@ class OrderExecutor:
         )
 
     # -----------------------------------------------------------------
+    # Error Classification (Fix 3)
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _classify_error(exc: Exception) -> str:
+        """Classify a CCXT exception as 'fatal' or 'transient'.
+
+        Fatal errors (should trigger shutdown):
+          - AuthenticationError (401, invalid API key)
+          - AccountNotEnabled
+          - PermissionDenied (403)
+          - ExchangeNotAvailable (maintenance/IP ban)
+
+        Transient errors (safe to retry):
+          - NetworkError, RequestTimeout
+          - RateLimitExceeded (will auto-throttle)
+          - ExchangeError (generic, usually recoverable)
+        """
+        if isinstance(exc, (ccxt.AuthenticationError, ccxt.AccountNotEnabled)):
+            return "fatal"
+        if isinstance(exc, ccxt.PermissionDenied):
+            return "fatal"
+        if isinstance(exc, ccxt.ExchangeNotAvailable):
+            # Could be maintenance or IP ban – treat as fatal
+            return "fatal"
+        if isinstance(exc, (ccxt.NetworkError, ccxt.RequestTimeout)):
+            return "transient"
+        if isinstance(exc, ccxt.RateLimitExceeded):
+            return "transient"
+        if isinstance(exc, ccxt.ExchangeError):
+            return "transient"
+        # Unknown – default to transient to avoid unnecessary shutdowns
+        return "transient"
+
+    def _handle_exchange_error(self, exc: Exception, context: str) -> None:
+        """Log and optionally raise FatalExchangeError based on classification."""
+        severity = self._classify_error(exc)
+        if severity == "fatal":
+            logger.critical(
+                "FATAL EXCHANGE ERROR in {} | {} | {}", context, type(exc).__name__, exc
+            )
+            raise FatalExchangeError(
+                f"Fatal exchange error in {context}: {exc}"
+            ) from exc
+        else:
+            logger.warning(
+                "Transient error in {} | {} | {} – will retry",
+                context,
+                type(exc).__name__,
+                exc,
+            )
+
+    # -----------------------------------------------------------------
     # Margin Type
     # -----------------------------------------------------------------
     def set_margin_type(self, symbol: str | None = None) -> bool:
-        """Set ISOLATED margin mode for *symbol* on Binance Futures.
-
-        Returns *True* on success (or already set), *False* on failure.
-        """
+        """Set ISOLATED margin mode for *symbol* on Binance Futures."""
         symbol = symbol or self.symbol
         try:
             self.exchange.set_margin_mode("isolated", symbol)
@@ -56,21 +119,17 @@ class OrderExecutor:
             return True
         except Exception as exc:
             err_msg = str(exc).lower()
-            # Binance returns an error if margin type is already set
             if "no need to change" in err_msg or "already" in err_msg:
-                logger.debug("Margin mode already ISOLATED for {} \u2013 no change needed", symbol)
+                logger.debug("Margin mode already ISOLATED for {} – no change needed", symbol)
                 return True
-            logger.error("Failed to set margin mode for {}: {}", symbol, exc)
+            self._handle_exchange_error(exc, "set_margin_type")
             return False
 
     # -----------------------------------------------------------------
     # Leverage
     # -----------------------------------------------------------------
     def set_leverage(self, symbol: str | None = None, leverage: int | None = None) -> bool:
-        """Set leverage for *symbol* on Binance Futures.
-
-        Returns *True* on success, *False* on failure.
-        """
+        """Set leverage for *symbol* on Binance Futures."""
         symbol = symbol or self.symbol
         leverage = leverage or self.risk.leverage
         try:
@@ -80,13 +139,146 @@ class OrderExecutor:
         except Exception as exc:
             err_msg = str(exc).lower()
             if "no need to change" in err_msg or "same leverage" in err_msg:
-                logger.debug("Leverage already {}x for {} \u2013 no change needed", leverage, symbol)
+                logger.debug("Leverage already {}x for {} – no change needed", leverage, symbol)
                 return True
-            logger.error("Failed to set leverage for {}: {}", symbol, exc)
+            self._handle_exchange_error(exc, "set_leverage")
             return False
 
     # -----------------------------------------------------------------
-    # Open Position (with separate SL + TP bracket orders)
+    # Slippage Check (Fix 1)
+    # -----------------------------------------------------------------
+    def _check_slippage(
+        self, expected_price: float, fill_price: float, side: str
+    ) -> bool:
+        """Return True if slippage is within tolerance.
+
+        For BUY:  fill_price should be <= expected * (1 + tolerance)
+        For SELL: fill_price should be >= expected * (1 - tolerance)
+        """
+        if expected_price <= 0:
+            logger.warning("Expected price is 0 – skipping slippage check")
+            return True
+
+        slippage = (fill_price - expected_price) / expected_price
+
+        if side.lower() == "buy":
+            # Buying higher than expected is bad slippage
+            within_tolerance = slippage <= self.slippage_tolerance
+        else:
+            # Selling lower than expected is bad slippage
+            within_tolerance = (-slippage) <= self.slippage_tolerance
+
+        logger.info(
+            "SLIPPAGE CHECK | side={} | expected={:.2f} | filled={:.2f} | "
+            "slippage={:+.4%} | tolerance={:.4%} | {}",
+            side.upper(),
+            expected_price,
+            fill_price,
+            slippage,
+            self.slippage_tolerance,
+            "PASS" if within_tolerance else "FAIL",
+        )
+        return within_tolerance
+
+    def _emergency_flatten(self, symbol: str, side: str, amount: float) -> None:
+        """Immediately close a position when slippage exceeds tolerance."""
+        opposite = "sell" if side.lower() == "buy" else "buy"
+        try:
+            logger.critical(
+                "SLIPPAGE EXCEEDED – emergency flatten {} {} {}",
+                opposite.upper(), symbol, amount,
+            )
+            self.exchange.create_order(
+                symbol=symbol,
+                type="market",
+                side=opposite,
+                amount=amount,
+                params={"reduceOnly": True},
+            )
+            logger.info("Emergency flatten complete for {}", symbol)
+        except Exception as exc:
+            logger.critical(
+                "EMERGENCY FLATTEN FAILED for {} – MANUAL INTERVENTION REQUIRED: {}",
+                symbol, exc,
+            )
+
+    # -----------------------------------------------------------------
+    # Atomic Bracket Rollback (Fix 2)
+    # -----------------------------------------------------------------
+    def _place_bracket_orders(
+        self,
+        symbol: str,
+        opposite_side: str,
+        amount_float: float,
+        stop_loss: float,
+        take_profit: float,
+    ) -> tuple[dict | None, dict | None]:
+        """Place SL and TP orders. If either fails, cancel the other and
+        flatten the position to avoid naked exposure.
+
+        Returns (sl_order, tp_order) – both None on rollback.
+        """
+        sl_order = None
+        tp_order = None
+
+        # --- Place SL ---
+        try:
+            sl_order = self.exchange.create_order(
+                symbol=symbol,
+                type="STOP_MARKET",
+                side=opposite_side,
+                amount=amount_float,
+                price=None,
+                params={
+                    "stopPrice": self.exchange.price_to_precision(symbol, stop_loss),
+                    "closePosition": True,
+                },
+            )
+            logger.info(
+                "SL ORDER placed | id={} | trigger={:.2f}",
+                sl_order.get("id", "unknown"),
+                stop_loss,
+            )
+        except Exception as sl_exc:
+            logger.error("SL ORDER FAILED: {} – rolling back position", sl_exc)
+            self._handle_exchange_error(sl_exc, "place_sl_order")
+            # SL failed – no bracket protection, must flatten
+            return None, None
+
+        # --- Place TP ---
+        try:
+            tp_order = self.exchange.create_order(
+                symbol=symbol,
+                type="TAKE_PROFIT_MARKET",
+                side=opposite_side,
+                amount=amount_float,
+                price=None,
+                params={
+                    "stopPrice": self.exchange.price_to_precision(symbol, take_profit),
+                    "closePosition": True,
+                },
+            )
+            logger.info(
+                "TP ORDER placed | id={} | trigger={:.2f}",
+                tp_order.get("id", "unknown"),
+                take_profit,
+            )
+        except Exception as tp_exc:
+            logger.error("TP ORDER FAILED: {} – cancelling SL and rolling back", tp_exc)
+            # Cancel the SL we just placed
+            try:
+                if sl_order and sl_order.get("id"):
+                    self.exchange.cancel_order(sl_order["id"], symbol)
+                    logger.info("Cancelled orphaned SL order {}", sl_order["id"])
+            except Exception as cancel_exc:
+                logger.error("Failed to cancel orphaned SL: {}", cancel_exc)
+            self._handle_exchange_error(tp_exc, "place_tp_order")
+            return None, None
+
+        return sl_order, tp_order
+
+    # -----------------------------------------------------------------
+    # Open Position (with all 3 fixes integrated)
     # -----------------------------------------------------------------
     def open_position(
         self,
@@ -95,12 +287,16 @@ class OrderExecutor:
         amount: float,
         stop_loss: float,
         take_profit: float,
+        expected_entry: float = 0.0,
     ) -> dict[str, Any] | None:
-        """Place a market order with separate STOP_MARKET and TAKE_PROFIT_MARKET orders.
+        """Place a market order with slippage check + atomic SL/TP bracket.
 
-        Binance Futures does not support SL/TP as params on the market order
-        itself, so we place them as independent conditional orders with
-        ``closePosition=True``.
+        Flow:
+        1. Market order entry
+        2. Slippage check – if FAIL, emergency flatten & abort
+        3. Place SL order – if FAIL, flatten & abort
+        4. Place TP order – if FAIL, cancel SL, flatten & abort
+        5. Recalculate SL/TP from actual fill price (not expected)
 
         Parameters
         ----------
@@ -114,6 +310,9 @@ class OrderExecutor:
             Absolute stop-loss trigger price.
         take_profit : float
             Absolute take-profit trigger price.
+        expected_entry : float
+            Expected entry price for slippage comparison.
+            If 0, slippage check is skipped.
 
         Returns
         -------
@@ -122,12 +321,11 @@ class OrderExecutor:
         """
         try:
             # Round amount to exchange precision
-            market = self.exchange.market(symbol)
             amount = self.exchange.amount_to_precision(symbol, amount)
             amount_float = float(amount)
 
             if amount_float <= 0:
-                logger.warning("Calculated amount is 0 \u2013 skipping order")
+                logger.warning("Calculated amount is 0 – skipping order")
                 return None
 
             opposite_side = "sell" if side.lower() == "buy" else "buy"
@@ -141,7 +339,7 @@ class OrderExecutor:
                 take_profit,
             )
 
-            # 1) Place market entry order
+            # ---- Step 1: Market entry ----
             order = self.exchange.create_market_order(
                 symbol=symbol,
                 side=side.lower(),
@@ -150,78 +348,71 @@ class OrderExecutor:
 
             order_id = order.get("id", "unknown")
             avg_price = order.get("average") or order.get("price", 0)
-            filled = order.get("filled", 0)
-
-            # Use fill price for bracket orders if available
-            entry_price = float(avg_price) if avg_price else stop_loss
+            filled = float(order.get("filled", 0))
+            fill_price = float(avg_price) if avg_price else 0.0
 
             logger.info(
                 "ENTRY FILLED | id={} | side={} | filled={} @ {:.2f}",
                 order_id,
                 side.upper(),
                 filled,
-                entry_price,
+                fill_price,
             )
 
-            # 2) Place stop-loss (STOP_MARKET) \u2013 closes entire position
-            try:
-                sl_order = self.exchange.create_order(
-                    symbol=symbol,
-                    type="STOP_MARKET",
-                    side=opposite_side,
-                    amount=amount_float,
-                    price=None,
-                    params={
-                        "stopPrice": self.exchange.price_to_precision(symbol, stop_loss),
-                        "closePosition": True,
-                    },
-                )
-                logger.info(
-                    "SL ORDER placed | id={} | trigger={:.2f}",
-                    sl_order.get("id", "unknown"),
-                    stop_loss,
-                )
-            except Exception as sl_exc:
-                logger.error("Failed to place SL order: {}", sl_exc)
+            # ---- Step 2: Slippage check (Fix 1) ----
+            if expected_entry > 0 and fill_price > 0:
+                if not self._check_slippage(expected_entry, fill_price, side):
+                    self._emergency_flatten(symbol, side, filled or amount_float)
+                    return None
 
-            # 3) Place take-profit (TAKE_PROFIT_MARKET) \u2013 closes entire position
-            try:
-                tp_order = self.exchange.create_order(
-                    symbol=symbol,
-                    type="TAKE_PROFIT_MARKET",
-                    side=opposite_side,
-                    amount=amount_float,
-                    price=None,
-                    params={
-                        "stopPrice": self.exchange.price_to_precision(symbol, take_profit),
-                        "closePosition": True,
-                    },
+            # ---- Step 3: Recalculate SL/TP from actual fill price ----
+            if fill_price > 0:
+                actual_sl = self.risk.get_stop_loss(fill_price, side)
+                actual_tp = self.risk.get_take_profit(fill_price, side)
+                if actual_sl != stop_loss or actual_tp != take_profit:
+                    logger.info(
+                        "SL/TP adjusted for fill price | SL: {:.2f}->{:.2f} | TP: {:.2f}->{:.2f}",
+                        stop_loss, actual_sl, take_profit, actual_tp,
+                    )
+                    stop_loss = actual_sl
+                    take_profit = actual_tp
+
+            # ---- Step 4: Atomic bracket (Fix 2) ----
+            sl_order, tp_order = self._place_bracket_orders(
+                symbol=symbol,
+                opposite_side=opposite_side,
+                amount_float=filled or amount_float,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
+
+            if sl_order is None or tp_order is None:
+                # Bracket failed – flatten the position
+                logger.critical(
+                    "BRACKET INCOMPLETE – flattening position for safety"
                 )
-                logger.info(
-                    "TP ORDER placed | id={} | trigger={:.2f}",
-                    tp_order.get("id", "unknown"),
-                    take_profit,
-                )
-            except Exception as tp_exc:
-                logger.error("Failed to place TP order: {}", tp_exc)
+                self._emergency_flatten(symbol, side, filled or amount_float)
+                return None
 
             logger.info(
                 "BRACKET COMPLETE | entry={:.2f} | SL={:.2f} | TP={:.2f}",
-                entry_price,
+                fill_price,
                 stop_loss,
                 take_profit,
             )
 
+            # Attach fill info for caller
+            order["_fill_price"] = fill_price
+            order["_actual_sl"] = stop_loss
+            order["_actual_tp"] = take_profit
+
             return order
 
+        except FatalExchangeError:
+            # Re-raise – main loop must catch this and shut down
+            raise
         except Exception as exc:
-            logger.error(
-                "ORDER FAILED | {} {} {} | error: {}",
-                side.upper(),
-                symbol,
-                amount,
-                exc,
-            )
+            self._handle_exchange_error(exc, f"open_position {side} {symbol}")
             return None
 
     # -----------------------------------------------------------------
@@ -233,14 +424,8 @@ class OrderExecutor:
         1. Cancel all open orders (SL/TP) for the symbol.
         2. Detect position side and size.
         3. Place a counter market order to flatten.
-
-        Returns
-        -------
-        dict | None
-            CCXT order response, or ``None`` if nothing to close.
         """
         try:
-            # Cancel all conditional orders first (SL/TP)
             self.cancel_all_orders(symbol)
 
             positions = self.exchange.fetch_positions([symbol])
@@ -249,7 +434,7 @@ class OrderExecutor:
                 if contracts <= 0:
                     continue
 
-                pos_side = pos.get("side", "").lower()  # "long" or "short"
+                pos_side = pos.get("side", "").lower()
                 close_side = "sell" if pos_side == "long" else "buy"
 
                 logger.info(
@@ -279,18 +464,14 @@ class OrderExecutor:
             return None
 
         except Exception as exc:
-            logger.error("Failed to close position for {}: {}", symbol, exc)
+            self._handle_exchange_error(exc, f"close_position {symbol}")
             return None
 
     # -----------------------------------------------------------------
     # Query Open Positions
     # -----------------------------------------------------------------
     def get_open_positions(self, symbol: str) -> list[dict[str, Any]]:
-        """Return a list of open positions for *symbol*.
-
-        Each dict contains at minimum: ``side``, ``contracts``,
-        ``entry_price``, ``unrealized_pnl``.
-        """
+        """Return a list of open positions for *symbol*."""
         try:
             positions = self.exchange.fetch_positions([symbol])
             open_positions = [
@@ -314,20 +495,14 @@ class OrderExecutor:
             return open_positions
 
         except Exception as exc:
-            logger.error("Failed to fetch positions for {}: {}", symbol, exc)
+            self._handle_exchange_error(exc, f"get_open_positions {symbol}")
             return []
 
     # -----------------------------------------------------------------
     # Cancel All Orders
     # -----------------------------------------------------------------
     def cancel_all_orders(self, symbol: str) -> int:
-        """Cancel every pending (open) order for *symbol*.
-
-        Returns
-        -------
-        int
-            Number of orders successfully cancelled.
-        """
+        """Cancel every pending (open) order for *symbol*."""
         try:
             open_orders = self.exchange.fetch_open_orders(symbol)
             if not open_orders:
@@ -358,7 +533,5 @@ class OrderExecutor:
             return cancelled
 
         except Exception as exc:
-            logger.error(
-                "Failed to fetch/cancel orders for {}: {}", symbol, exc
-            )
+            self._handle_exchange_error(exc, f"cancel_all_orders {symbol}")
             return 0
