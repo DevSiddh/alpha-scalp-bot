@@ -1,8 +1,8 @@
-# Alpha-Scalp Bybit Bot
+# Alpha-Scalp Binance Bot
 
-**Automated cryptocurrency scalping bot for Bybit Futures (Linear Perpetuals)**
+**Automated cryptocurrency scalping bot for Binance USD-M Futures**
 
-A production-grade Python bot that executes high-frequency scalp trades on Bybit using a triple-confirmation strategy: EMA crossover + RSI momentum + Nadaraya-Watson kernel envelope. Built with strict risk management including a 3% daily kill switch.
+A production-grade Python bot that executes high-frequency scalp trades on Binance Futures using a triple-confirmation strategy: EMA crossover + RSI momentum + Nadaraya-Watson kernel envelope. Built with strict risk management including a 3% daily kill switch.
 
 ---
 
@@ -12,7 +12,9 @@ A production-grade Python bot that executes high-frequency scalp trades on Bybit
 - **Nadaraya-Watson Kernel Regression** -- Gaussian kernel-based dynamic support/resistance envelope (not a simple moving average)
 - **Strict Risk Management** -- 1% equity risk per trade, 0.5% stop-loss, 1.0% take-profit (2:1 R/R)
 - **3% Daily Kill Switch** -- Automatically halts all trading if daily drawdown hits 3%
-- **Bybit Futures via CCXT** -- Works with linear perpetual contracts (USDT-margined)
+- **Binance Futures via CCXT** -- Works with USD-M perpetual contracts (USDT-margined)
+- **Bracket Orders** -- Separate STOP_MARKET and TAKE_PROFIT_MARKET orders placed after entry fill
+- **Isolated Margin** -- Sets isolated margin mode per symbol for controlled risk
 - **Paper Trading Mode** -- Testnet enabled by default for safe strategy validation
 - **Telegram Alerts** -- Real-time trade notifications, kill-switch warnings, and daily P&L summaries
 - **Structured Logging** -- Full audit trail via Loguru with rotation and compression
@@ -57,9 +59,20 @@ All three conditions must be true simultaneously. This dramatically reduces fals
 | Take Profit | 1.0% | Distance from entry (2:1 reward/risk) |
 | Daily Drawdown | 3% | Kill switch threshold |
 | Max Positions | 1 | Only one open position at a time |
-| Leverage | 5x | Default leverage on Bybit |
+| Leverage | 5x | Default leverage on Binance Futures |
+| Margin Mode | Isolated | Per-symbol isolated margin |
 
 The kill switch compares current equity to the balance at UTC midnight. Once triggered, all trading halts until the next day.
+
+---
+
+## Order Flow
+
+1. **Entry**: Market order via `create_market_order()`
+2. **Stop-Loss**: `STOP_MARKET` order with `closePosition: True` at SL trigger price
+3. **Take-Profit**: `TAKE_PROFIT_MARKET` order with `closePosition: True` at TP trigger price
+
+When either SL or TP triggers, Binance closes the entire position. On shutdown or manual close, all pending conditional orders are cancelled first.
 
 ---
 
@@ -71,7 +84,7 @@ alpha-scalp-bot/
 |-- config.py            # Configuration from .env with defaults
 |-- strategy.py          # Signal generation (EMA + RSI + NW)
 |-- risk_engine.py       # Kill switch, position sizing, SL/TP
-|-- order_executor.py    # CCXT order management for Bybit
+|-- order_executor.py    # CCXT order management for Binance Futures
 |-- telegram_alerts.py   # Async Telegram notifications
 |-- requirements.txt     # Python dependencies
 |-- .env.example         # Template for environment variables
@@ -84,7 +97,7 @@ alpha-scalp-bot/
 
 ### Prerequisites
 - Python 3.11+
-- Bybit account (testnet or live)
+- Binance account (testnet or live)
 - Telegram bot token (optional, for alerts)
 
 ### 1. Clone & Install
@@ -93,7 +106,7 @@ alpha-scalp-bot/
 git clone <your-repo-url> alpha-scalp-bot
 cd alpha-scalp-bot
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\\Scripts\\activate
 pip install -r requirements.txt
 ```
 
@@ -106,19 +119,20 @@ cp .env.example .env
 Edit `.env` with your credentials:
 
 ```env
-BYBIT_API_KEY=your_api_key_here
-BYBIT_API_SECRET=your_api_secret_here
-BYBIT_TESTNET=true
+BINANCE_API_KEY=your_api_key_here
+BINANCE_SECRET=your_api_secret_here
+BINANCE_TESTNET=true
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
 ```
 
-### 3. Get Bybit Testnet Keys
+### 3. Get Binance Futures Testnet Keys
 
-1. Go to [testnet.bybit.com](https://testnet.bybit.com)
-2. Create an account and generate API keys
-3. Enable **Futures Trading** permission
-4. Add keys to your `.env` file
+1. Go to [testnet.binancefuture.com](https://testnet.binancefuture.com)
+2. Log in with your GitHub account
+3. Generate API keys from the API Key management page
+4. The testnet comes with a pre-funded balance for paper trading
+5. Add keys to your `.env` file
 
 ### 4. Run the Bot
 
@@ -127,11 +141,12 @@ python main.py
 ```
 
 The bot will:
-- Connect to Bybit testnet
+- Connect to Binance Futures testnet
+- Set isolated margin mode and 5x leverage
 - Send a startup message to Telegram
 - Begin scanning for trade signals every 5 seconds
-- Execute trades when triple-confirmation fires
-- Automatically manage SL/TP and daily risk
+- Execute trades with bracket orders (SL + TP) when triple-confirmation fires
+- Automatically manage risk and daily drawdown
 
 ---
 
@@ -139,16 +154,17 @@ The bot will:
 
 | Setting | Mode |
 |---------|------|
-| `BYBIT_TESTNET=true` | **Paper trading** (testnet) -- no real money |
-| `BYBIT_TESTNET=false` | **Live trading** -- REAL FUNDS AT RISK |
+| `BINANCE_TESTNET=true` | **Paper trading** (testnet) -- no real money |
+| `BINANCE_TESTNET=false` | **Live trading** -- REAL FUNDS AT RISK |
 
 **Always test extensively on testnet before going live.**
 
 To switch to live:
-1. Create API keys on [bybit.com](https://bybit.com) (not testnet)
-2. Update `.env` with live keys
-3. Set `BYBIT_TESTNET=false`
-4. Fund your Bybit USDT Perpetuals account
+1. Create API keys on [binance.com](https://www.binance.com) (not testnet)
+2. Enable **Futures Trading** on your Binance account
+3. Update `.env` with live keys
+4. Set `BINANCE_TESTNET=false`
+5. Transfer USDT to your USD-M Futures wallet
 
 ---
 
@@ -158,7 +174,7 @@ All parameters can be overridden via `.env`:
 
 ```env
 # Trading
-SYMBOL=BTC/USDT:USDT
+SYMBOL=BTC/USDT
 TIMEFRAME=1m
 LOOKBACK_CANDLES=200
 LEVERAGE=5
@@ -207,8 +223,8 @@ Logs are written to `logs/alpha_scalp.log` with:
 
 Press `Ctrl+C` or send `SIGTERM`. The bot will:
 1. Stop accepting new signals
-2. Close any open positions
-3. Cancel pending orders
+2. Cancel all pending conditional orders (SL/TP)
+3. Close any open positions
 4. Send a shutdown notification to Telegram
 5. Exit cleanly
 
@@ -233,7 +249,7 @@ Press `Ctrl+C` or send `SIGTERM`. The bot will:
 ## Tech Stack
 
 - **Python 3.11+** -- Async-first architecture
-- **CCXT 4.x** -- Unified exchange API
+- **CCXT 4.x** -- Unified exchange API (Binance Futures)
 - **pandas-ta** -- Technical indicators (EMA, RSI)
 - **NumPy** -- Nadaraya-Watson kernel regression
 - **Loguru** -- Structured logging
