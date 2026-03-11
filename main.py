@@ -1029,13 +1029,13 @@ async def run_bot_ws() -> None:
 
     if not market_state.is_ready:
         logger.warning(
-            "MarketState not fully ready after 60s (candles=%d, book=%s) - starting dispatcher anyway",
+            "MarketState not fully ready after 60s (candles={}, book={}) - starting dispatcher anyway",
             market_state.candles.history_len,
             market_state.book.initialized,
         )
     else:
         logger.info(
-            "MarketState ready: %d candles, book %s, last price=%.2f",
+            "MarketState ready: {} candles, book {}, last price={:.2f}",
             market_state.candles.history_len,
             "OK" if market_state.book.initialized else "pending",
             market_state.last_trade_price,
@@ -1055,12 +1055,12 @@ async def run_bot_ws() -> None:
         except asyncio.TimeoutError:
             # Health check
             if not ws_manager.is_healthy:
-                logger.warning("[WS] Health check FAILED: %s", ws_manager.metrics())
+                logger.warning("[WS] Health check FAILED: {}", ws_manager.metrics())
 
             d_metrics = dispatcher.metrics()
             if d_metrics.get("pipeline_runs", 0) > 0:
                 logger.info(
-                    "[WS] Dispatcher: runs=%d errors=%d dropped=%d avg=%.1fms",
+                    "[WS] Dispatcher: runs={} errors={} dropped={} avg={:.1f}ms",
                     d_metrics["pipeline_runs"], d_metrics["pipeline_errors"],
                     d_metrics["events_dropped"], d_metrics["avg_pipeline_ms"],
                 )
