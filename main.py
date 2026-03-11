@@ -91,6 +91,10 @@ _TF_INTERVALS = {"1m": 5, "3m": 15, "5m": 25}
 # ---------------------------------------------------------------------------
 def _create_exchange() -> ccxt.Exchange:
     """Instantiate and configure the Binance Futures CCXT client."""
+    # ccxt >= 4.5.6 required for Binance Demo Trading support
+    _ccxt_ver = tuple(int(x) for x in ccxt.__version__.split(".")[:3])
+    logger.info("ccxt version: {} (parsed: {})", ccxt.__version__, _ccxt_ver)
+
     common_cfg = {
         "apiKey": cfg.BINANCE_API_KEY,
         "secret": cfg.BINANCE_SECRET,
@@ -107,6 +111,11 @@ def _create_exchange() -> ccxt.Exchange:
         # demo-fapi.binance.com for futures (and demo spot if needed).
         # API keys must be generated from Binance's Demo Trading page:
         # https://www.binance.com/en/support/faq/detail/9be58f73e5e14338809e3b705b9687dd
+        if _ccxt_ver < (4, 5, 6):
+            raise RuntimeError(
+                f"ccxt {ccxt.__version__} is too old for Demo Trading. "
+                f"Run: pip install -U ccxt   (need >= 4.5.6)"
+            )
         exchange = ccxt.binance({
             **common_cfg,
             "options": {**common_cfg["options"], "defaultType": "future"},
@@ -118,7 +127,19 @@ def _create_exchange() -> ccxt.Exchange:
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
 
     # Verify connectivity
-    exchange.load_markets()
+    try:
+        exchange.load_markets()
+    except Exception as exc:
+        logger.error("load_markets() failed: {}: {}", type(exc).__name__, exc)
+        if cfg.BINANCE_DEMO_TRADING:
+            logger.error(
+                "HINT: Demo Trading requires API keys generated from "
+                "Binance Demo Trading page (NOT old testnet keys). "
+                "See: https://www.binance.com/en/support/faq/detail/"
+                "9be58f73e5e14338809e3b705b9687dd\n"
+                "Also ensure ccxt is up-to-date: pip install -U ccxt"
+            )
+        raise
     logger.info(
         "Markets loaded | {} pairs available", len(exchange.markets)
     )
@@ -683,7 +704,9 @@ async def run_bot_ws() -> None:
     try:
         exchange = _create_exchange()
     except Exception as exc:
-        logger.critical("Exchange init failed: {}", exc)
+        import traceback as _tb
+        logger.critical("Exchange init failed: {}: {}", type(exc).__name__, exc)
+        logger.critical("Full traceback:\n{}", _tb.format_exc())
         sys.exit(1)
 
     risk = RiskEngine(exchange)
