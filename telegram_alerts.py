@@ -611,3 +611,55 @@ class TelegramAlerts:
             f"Time   : <code>{now}</code>"
         )
         return await self.send_message(text)
+
+    # =================================================================
+    # SWING: Trade Entry Alert
+    # =================================================================
+    async def send_swing_trade_alert(
+        self,
+        side: str,
+        symbol: str,
+        entry: float,
+        sl: float,
+        tp: float,
+        size: float,
+        confidence: float | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        """Send swing trade entry alert."""
+        now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        icon = "LONG" if side.lower() in ("buy", "long") else "SHORT"
+
+        risk_amt = abs(entry - sl)
+        reward_amt = abs(tp - entry)
+        rr = reward_amt / risk_amt if risk_amt > 0 else 0
+
+        detail_lines = []
+        if confidence is not None:
+            conf_label = "STRONG" if confidence >= 0.75 else "MODERATE" if confidence >= 0.5 else "WEAK"
+            detail_lines.append(f"Signal   : <code>{confidence:.0%} confidence</code> [{conf_label}]")
+        if reason:
+            detail_lines.append(f"Reason   : <code>{reason}</code>")
+
+        detail_block = ""
+        if detail_lines:
+            detail_block = (
+                f"\n"
+                f"<b>-- Signal Intel --</b>\n"
+                + "\n".join(detail_lines)
+                + "\n"
+            )
+
+        text = (
+            f"<b>[{icon}] SWING Entry | {symbol}</b>\n"
+            f"\n"
+            f"Entry  : <code>{entry:,.4f}</code>\n"
+            f"SL     : <code>{sl:,.4f}</code>\n"
+            f"TP     : <code>{tp:,.4f}</code>\n"
+            f"Size   : <code>{size:.4f}</code>\n"
+            f"R:R    : <code>1:{rr:.1f}</code>\n"
+            f"{detail_block}"
+            f"\n"
+            f"<i>{now}</i>"
+        )
+        return await self.send_message(text)
