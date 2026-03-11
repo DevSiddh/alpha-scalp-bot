@@ -1,78 +1,70 @@
-# Alpha-Scalp Binance Bot
+# Alpha-Scalp Bot
 
-**Automated cryptocurrency scalping bot for Binance USD-M Futures**
+**Production-grade crypto scalping bot for Binance USD-M Futures**
 
-A production-grade Python bot that executes high-frequency scalp trades on Binance Futures using a triple-confirmation strategy: EMA crossover + RSI momentum + Nadaraya-Watson kernel envelope. Built with strict risk management including a 3% daily kill switch.
-
----
-
-## Features
-
-- **Triple-Confirmation Strategy** -- Trades only fire when EMA crossover, RSI momentum, AND Nadaraya-Watson envelope all align
-- **Nadaraya-Watson Kernel Regression** -- Gaussian kernel-based dynamic support/resistance envelope (not a simple moving average)
-- **Strict Risk Management** -- 1% equity risk per trade, 0.5% stop-loss, 1.0% take-profit (2:1 R/R)
-- **3% Daily Kill Switch** -- Automatically halts all trading if daily drawdown hits 3%
-- **Binance Futures via CCXT** -- Works with USD-M perpetual contracts (USDT-margined)
-- **Bracket Orders** -- Separate STOP_MARKET and TAKE_PROFIT_MARKET orders placed after entry fill
-- **Isolated Margin** -- Sets isolated margin mode per symbol for controlled risk
-- **Paper Trading Mode** -- Testnet enabled by default for safe strategy validation
-- **Telegram Alerts** -- Real-time trade notifications, kill-switch warnings, and daily P&L summaries
-- **Structured Logging** -- Full audit trail via Loguru with rotation and compression
-- **Graceful Shutdown** -- Clean exit on SIGINT/SIGTERM with position cleanup
+Event-driven Python bot with a modular alpha engine pipeline, real-time WebSocket market data, adaptive signal scoring, and strict risk management. Supports both polling and WebSocket execution modes.
 
 ---
 
-## Strategy Explained
+## Architecture Overview
 
-### 1. EMA Crossover (Trend)
-- **EMA 9** (fast) vs **EMA 21** (slow)
-- Bullish cross (fast > slow) = potential long entry
-- Bearish cross (fast < slow) = potential short entry
+The bot uses a layered signal pipeline:
 
-### 2. RSI Filter (Momentum)
-- **RSI 14** confirms momentum isn't exhausted
-- Long entries require RSI < 35 (oversold zone)
-- Short entries require RSI > 65 (overbought zone)
-
-### 3. Nadaraya-Watson Envelope (Mean Reversion)
-- Gaussian kernel regression creates a dynamic "fair value" line
-- Upper/lower bands act as dynamic overbought/oversold levels
-- Long: price near or below the lower band
-- Short: price near or above the upper band
-
-### Signal Logic
 ```
-BUY  = EMA9 crosses above EMA21 AND RSI < 35 AND price <= NW lower band
-SELL = EMA9 crosses below EMA21 AND RSI > 65 AND price >= NW upper band
+Market Data (REST / WebSocket)
+        |
+  FeatureCache.compute(df)  -->  FeatureSet (indicators, regime, NW envelope)
+        |
+  AlphaEngine.generate_votes(fs)  -->  AlphaVotes (per-signal directional votes)
+        |
+  SignalScoring.score(votes, fs)  -->  ScoringResult (weighted composite score)
+        |
+  RiskEngine  -->  Position sizing (quarter-Kelly after warm-up)
+        |
+  OrderExecutor  -->  Binance Futures bracket orders (entry + SL + TP)
 ```
 
-All three conditions must be true simultaneously. This dramatically reduces false signals.
-
 ---
 
-## Risk Management
+## Key Features
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| Risk per Trade | 1% | Maximum equity at risk per position |
-| Stop Loss | 0.5% | Distance from entry price |
-| Take Profit | 1.0% | Distance from entry (2:1 reward/risk) |
-| Daily Drawdown | 3% | Kill switch threshold |
-| Max Positions | 1 | Only one open position at a time |
-| Leverage | 5x | Default leverage on Binance Futures |
-| Margin Mode | Isolated | Per-symbol isolated margin |
+### Signal Pipeline
+- **FeatureCache** -- Computes and caches all technical indicators (EMA, RSI, MACD, Bollinger, ATR, OBV, VWAP, Nadaraya-Watson envelope, volume profile, regime detection)
+- **AlphaEngine** -- Multi-signal voting system. Each alpha signal (trend, momentum, mean-reversion, volume, volatility) casts independent directional votes
+- **SignalScoring** -- Weighted composite scorer with JSON-configurable weights. Combines alpha votes into a single normalized score with confidence
+- **WeightOptimizer** -- Auto-tunes signal weights after 30+ trades based on historical per-signal P&L attribution
 
-The kill switch compares current equity to the balance at UTC midnight. Once triggered, all trading halts until the next day.
+### Execution Modes
+- **Polling mode** (`run_bot_polling`) -- Classic REST-based candle polling on a configurable interval
+- **WebSocket mode** (`run_bot_ws`) -- Event-driven via Binance WebSocket streams:
+  - Real-time kline/candlestick streams with candle completion callbacks
+  - Order book depth snapshots for spread/imbalance signals
+  - Price jump detection (configurable BPS threshold)
+  - Automatic reconnection with exponential backoff
 
----
+### WebSocket Infrastructure
+- **BinanceWSManager** -- Manages multiple WebSocket streams (kline, depth, trade) with heartbeat monitoring, auto-reconnect, and graceful shutdown
+- **MarketState** -- Maintains live order book, tracks bid/ask spread, book imbalance, mid-price, and detects price jumps. Validates book staleness
+- **StateChangeDispatcher** -- Routes market state changes to the alpha pipeline via typed callbacks (`on_candle_complete`, `on_book_update`, `on_price_jump`, `on_book_invalidated`)
 
-## Order Flow
+### Risk Management
+- **Quarter-Kelly position sizing** -- After 10-trade warm-up, uses Kelly criterion (capped at 25% Kelly, bounded 0.5%-5% equity)
+- **3% daily kill switch** -- Halts all trading if daily drawdown reaches 3%
+- **Bracket orders** -- Every entry places separate STOP_MARKET + TAKE_PROFIT_MARKET orders
+- **Isolated margin** -- Per-symbol margin isolation
+- **Graceful shutdown** -- SIGINT/SIGTERM cancels pending orders, closes positions, notifies Telegram
 
-1. **Entry**: Market order via `create_market_order()`
-2. **Stop-Loss**: `STOP_MARKET` order with `closePosition: True` at SL trigger price
-3. **Take-Profit**: `TAKE_PROFIT_MARKET` order with `closePosition: True` at TP trigger price
+### Trade Tracking
+- **TradeTrackerV2** -- Enhanced trade journal with per-signal attribution, win/loss streaks, Sharpe ratio, max drawdown, and regime-tagged analytics
+- **TradeTracker** -- Legacy tracker (still available for simpler setups)
 
-When either SL or TP triggers, Binance closes the entire position. On shutdown or manual close, all pending conditional orders are cancelled first.
+### Strategies
+- **ScalpStrategy** -- Primary strategy using the alpha engine pipeline (EMA, RSI, NW envelope, MACD, Bollinger, volume, volatility signals)
+- **SwingStrategy** -- Longer-timeframe swing trading with multi-timeframe confirmation
+
+### Alerts & Logging
+- **Telegram alerts** -- Real-time trade entries/exits, kill-switch warnings, daily P&L summaries, and session stats
+- **Loguru logging** -- Structured logging with rotation, compression, and 7-day retention
 
 ---
 
@@ -80,16 +72,41 @@ When either SL or TP triggers, Binance closes the entire position. On shutdown o
 
 ```
 alpha-scalp-bot/
-|-- main.py              # Entry point & async trading loop
-|-- config.py            # Configuration from .env with defaults
-|-- strategy.py          # Signal generation (EMA + RSI + NW)
-|-- risk_engine.py       # Kill switch, position sizing, SL/TP
-|-- order_executor.py    # CCXT order management for Binance Futures
-|-- telegram_alerts.py   # Async Telegram notifications
-|-- requirements.txt     # Python dependencies
-|-- .env.example         # Template for environment variables
-|-- logs/                # Auto-created log directory
+|-- main.py               # Entry point: polling + WebSocket modes, pipeline orchestration
+|-- config.py             # All configuration from .env with defaults
+|-- feature_cache.py      # Technical indicator computation & caching (FeatureSet)
+|-- alpha_engine.py       # Multi-signal voting engine (AlphaVotes)
+|-- signal_scoring.py     # Weighted composite scoring (ScoringResult)
+|-- weight_optimizer.py   # Auto-tunes signal weights from trade history
+|-- strategy.py           # ScalpStrategy (signal generation + Kelly sizing)
+|-- swing_strategy.py     # SwingStrategy (multi-TF swing trades)
+|-- risk_engine.py        # Kill switch, position sizing, SL/TP management
+|-- order_executor.py     # CCXT order management for Binance Futures
+|-- trade_tracker_v2.py   # Enhanced trade journal with per-signal attribution
+|-- trade_tracker.py      # Legacy trade tracker
+|-- ws_manager.py         # Binance WebSocket stream manager
+|-- market_state.py       # Live order book & price jump detection
+|-- state_dispatcher.py   # Routes WS events to pipeline callbacks
+|-- telegram_alerts.py    # Async Telegram notifications
+|-- backtest.py           # Backtesting using the full alpha engine pipeline
+|-- requirements.txt      # Python dependencies
+|-- .env.example          # Template for environment variables
 ```
+
+---
+
+## Risk Parameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Risk per Trade | 1% | Max equity at risk (warm-up period) |
+| Position Sizing | Quarter-Kelly | After 10 trades, bounded 0.5%-5% |
+| Stop Loss | 0.5% | Distance from entry |
+| Take Profit | 1.0% | 2:1 reward/risk ratio |
+| Daily Drawdown | 3% | Kill switch threshold |
+| Max Positions | 1 | One position at a time |
+| Leverage | 5x | Default leverage |
+| Margin Mode | Isolated | Per-symbol isolation |
 
 ---
 
@@ -97,80 +114,57 @@ alpha-scalp-bot/
 
 ### Prerequisites
 - Python 3.11+
-- Binance account (testnet or live)
+- Binance Futures account (testnet or live)
 - Telegram bot token (optional, for alerts)
 
 ### 1. Clone & Install
 
 ```bash
-git clone <your-repo-url> alpha-scalp-bot
+git clone https://github.com/DevSiddh/alpha-scalp-bot.git
 cd alpha-scalp-bot
 python -m venv venv
-source venv/bin/activate  # Windows: venv\\Scripts\\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment
+### 2. Configure
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` with your credentials:
+Edit `.env`:
 
 ```env
-BINANCE_API_KEY=your_api_key_here
-BINANCE_SECRET=your_api_secret_here
+# Binance
+BINANCE_API_KEY=your_key
+BINANCE_SECRET=your_secret
 BINANCE_TESTNET=true
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_CHAT_ID=your_chat_id_here
+
+# Telegram (optional)
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+
+# Execution mode
+USE_WEBSOCKET=false          # true = WS event-driven, false = REST polling
+WS_BOOK_DEPTH=10             # Order book depth levels
+WS_PRICE_JUMP_BPS=15         # Price jump detection threshold (basis points)
+WS_CANDLE_HISTORY=200        # Historical candles to load on WS startup
 ```
 
-### 3. Get Binance Futures Testnet Keys
-
-1. Go to [testnet.binancefuture.com](https://testnet.binancefuture.com)
-2. Log in with your GitHub account
-3. Generate API keys from the API Key management page
-4. The testnet comes with a pre-funded balance for paper trading
-5. Add keys to your `.env` file
-
-### 4. Run the Bot
+### 3. Run
 
 ```bash
+# Polling mode (default)
 python main.py
+
+# WebSocket mode
+USE_WEBSOCKET=true python main.py
 ```
-
-The bot will:
-- Connect to Binance Futures testnet
-- Set isolated margin mode and 5x leverage
-- Send a startup message to Telegram
-- Begin scanning for trade signals every 5 seconds
-- Execute trades with bracket orders (SL + TP) when triple-confirmation fires
-- Automatically manage risk and daily drawdown
-
----
-
-## Paper Trading vs Live Trading
-
-| Setting | Mode |
-|---------|------|
-| `BINANCE_TESTNET=true` | **Paper trading** (testnet) -- no real money |
-| `BINANCE_TESTNET=false` | **Live trading** -- REAL FUNDS AT RISK |
-
-**Always test extensively on testnet before going live.**
-
-To switch to live:
-1. Create API keys on [binance.com](https://www.binance.com) (not testnet)
-2. Enable **Futures Trading** on your Binance account
-3. Update `.env` with live keys
-4. Set `BINANCE_TESTNET=false`
-5. Transfer USDT to your USD-M Futures wallet
 
 ---
 
 ## Configuration Reference
-
-All parameters can be overridden via `.env`:
 
 ```env
 # Trading
@@ -196,6 +190,15 @@ NW_BANDWIDTH=8.0
 NW_MULT=2.0
 NW_LOOKBACK=50
 
+# WebSocket
+USE_WEBSOCKET=false
+WS_BOOK_DEPTH=10
+WS_PRICE_JUMP_BPS=15
+WS_CANDLE_HISTORY=200
+
+# Weight Optimization
+WEIGHT_OPT_MIN_TRADES=30    # Minimum trades before auto-optimization
+
 # Execution
 LOOP_INTERVAL=5
 ORDER_TYPE=market
@@ -209,24 +212,46 @@ LOG_ROTATION=10 MB
 
 ---
 
-## Logs
+## Backtesting
 
-Logs are written to `logs/alpha_scalp.log` with:
-- Automatic rotation at 10 MB
-- 7-day retention
-- Gzip compression of old logs
-- Full stack traces on errors
+```bash
+python backtest.py
+```
+
+The backtester uses the full alpha engine pipeline (FeatureCache -> AlphaEngine -> SignalScoring) and reports:
+- Per-trade entries with composite score, regime, and contributing signals
+- Win rate, total P&L, average return
+- Signal attribution breakdown
 
 ---
 
-## Stopping the Bot
+## How It Works
 
-Press `Ctrl+C` or send `SIGTERM`. The bot will:
-1. Stop accepting new signals
-2. Cancel all pending conditional orders (SL/TP)
-3. Close any open positions
-4. Send a shutdown notification to Telegram
-5. Exit cleanly
+### Polling Mode
+1. Fetches candles via REST every N seconds
+2. Runs the full pipeline: features -> alpha votes -> scoring
+3. If score exceeds threshold with sufficient confidence, executes trade
+4. Places bracket orders (SL + TP) and tracks via TradeTrackerV2
+5. After 30+ trades, runs weight optimizer to tune signal weights
+
+### WebSocket Mode
+1. Loads historical candles via REST on startup
+2. Opens WebSocket streams for kline, depth, and trade data
+3. On candle completion: runs the full alpha pipeline
+4. On book updates: recalculates spread/imbalance for the next signal
+5. On price jumps: triggers immediate pipeline evaluation
+6. Auto-reconnects on disconnection with exponential backoff
+
+---
+
+## Paper Trading vs Live
+
+| Setting | Mode |
+|---------|------|
+| `BINANCE_TESTNET=true` | Paper trading (testnet) |
+| `BINANCE_TESTNET=false` | **Live trading -- REAL FUNDS AT RISK** |
+
+**Always test on testnet first.**
 
 ---
 
@@ -236,11 +261,9 @@ Press `Ctrl+C` or send `SIGTERM`. The bot will:
 
 - Cryptocurrency trading involves substantial risk of loss
 - Past performance does not guarantee future results
-- This bot does NOT guarantee profits
 - You are solely responsible for your trading decisions
-- Always start with paper trading (testnet) and small position sizes
+- Always start with paper trading and small positions
 - Never risk more than you can afford to lose
-- The developers assume no liability for financial losses
 
 **USE AT YOUR OWN RISK.**
 
@@ -249,12 +272,13 @@ Press `Ctrl+C` or send `SIGTERM`. The bot will:
 ## Tech Stack
 
 - **Python 3.11+** -- Async-first architecture
-- **CCXT 4.x** -- Unified exchange API (Binance Futures)
-- **pandas-ta** -- Technical indicators (EMA, RSI)
-- **NumPy** -- Nadaraya-Watson kernel regression
+- **CCXT 4.x** -- Binance Futures (USD-M)
+- **pandas / pandas-ta** -- DataFrames + technical indicators
+- **NumPy / SciPy** -- Nadaraya-Watson kernel, statistical functions
+- **websockets** -- Binance WebSocket streams
 - **Loguru** -- Structured logging
-- **httpx** -- Async HTTP for Telegram
-- **python-dotenv** -- Environment configuration
+- **httpx** -- Async HTTP (Telegram)
+- **python-dotenv** -- Env configuration
 
 ---
 
