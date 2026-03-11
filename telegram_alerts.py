@@ -599,6 +599,38 @@ class TelegramAlerts:
             return [], offset
 
     # =================================================================
+    # Periodic Heartbeat (so user always knows bot is alive)
+    # =================================================================
+    async def send_heartbeat(
+        self,
+        uptime_str: str,
+        last_signal: str,
+        last_score: float,
+        regime: str,
+        book_ok: bool,
+        total_trades: int = 0,
+        session_pnl: float = 0.0,
+        spread_bps: float = 0.0,
+    ) -> bool:
+        """Send periodic heartbeat to confirm bot is alive and trading."""
+        now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        book_status = "OK" if book_ok else "REBUILDING"
+        text = (
+            f"<b>[PULSE] Alpha-Scalp Bot Alive</b>\n"
+            f"\n"
+            f"Uptime    : <code>{uptime_str}</code>\n"
+            f"Book      : <code>{book_status}</code>\n"
+            f"Spread    : <code>{spread_bps:.1f} bps</code>\n"
+            f"Last Sig  : <code>{last_signal} ({last_score:+.2f})</code>\n"
+            f"Regime    : <code>{regime}</code>\n"
+            f"Trades    : <code>{total_trades}</code>\n"
+            f"Session PnL: <code>${session_pnl:+.2f}</code>\n"
+            f"\n"
+            f"<i>{now}</i>"
+        )
+        return await self.send_message(text)
+
+    # =================================================================
     # Shutdown
     # =================================================================
     async def send_shutdown_message(self, reason: str = "Manual stop") -> bool:
