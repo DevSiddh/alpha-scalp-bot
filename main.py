@@ -127,20 +127,22 @@ def _create_exchange() -> ccxt.Exchange:
         exchange = ccxt.binance({**common_cfg, "options": {**common_cfg["options"], "defaultType": "future"}})
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
 
-    # Verify connectivity (retry up to 3× — demo endpoint can be slow / large response)
+    # Verify connectivity with lightweight ping (fetch_time ~100 bytes)
+    # Skip load_markets() — it downloads several MB of exchangeInfo and
+    # times out on slow connections.  ccxt lazy-loads markets on first call.
     import time as _time
     _retryable = (ccxt.RequestTimeout, ccxt.NetworkError, ccxt.ExchangeNotAvailable)
     for _attempt in range(1, 4):
         try:
-            exchange.load_markets()
+            server_time = exchange.fetch_time()
             break
         except Exception as exc:
             _is_timeout = isinstance(exc, _retryable) or "timeout" in str(exc).lower()
             if _is_timeout and _attempt < 3:
-                logger.warning("load_markets() attempt {}/3 failed ({}), retrying in 5s...", _attempt, type(exc).__name__)
+                logger.warning("Connectivity check attempt {}/3 failed ({}), retrying in 5s...", _attempt, type(exc).__name__)
                 _time.sleep(5)
                 continue
-            logger.error("load_markets() failed after {} attempt(s): {}: {}", _attempt, type(exc).__name__, exc)
+            logger.error("Connectivity check failed after {} attempt(s): {}: {}", _attempt, type(exc).__name__, exc)
             if cfg.BINANCE_DEMO_TRADING:
                 logger.error(
                     "HINT: Demo Trading requires API keys generated from "
@@ -150,9 +152,7 @@ def _create_exchange() -> ccxt.Exchange:
                     "Also ensure ccxt is up-to-date: pip install -U ccxt"
                 )
             raise
-    logger.info(
-        "Markets loaded | {} pairs available", len(exchange.markets)
-    )
+    logger.info("Exchange connected | server time: {}", server_time)
     return exchange
 
 
