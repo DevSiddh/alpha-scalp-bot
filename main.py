@@ -60,6 +60,28 @@ except ImportError as _ws_err:
     _WS_AVAILABLE = False
     logger.warning("WebSocket modules not available: {} - falling back to polling", _ws_err)
 
+# ---------------------------------------------------------------------------
+# Intercept stdlib logging so third-party libs (ccxt, websockets, asyncio)
+# don't crash the process with '%'-style format mismatches.
+# ---------------------------------------------------------------------------
+import logging as _stdlib_logging
+
+class _SafeInterceptHandler(_stdlib_logging.Handler):
+    """Route stdlib logging -> loguru, swallowing format errors."""
+    def emit(self, record: _stdlib_logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        try:
+            msg = record.getMessage()
+        except Exception:
+            # Format string mismatch — render what we can
+            msg = str(record.msg)
+        logger.opt(depth=6, exception=record.exc_info).log(level, "{}", msg)
+
+_stdlib_logging.basicConfig(handlers=[_SafeInterceptHandler()], level=0, force=True)
+
 # Timeframe-aware loop intervals (seconds) -- used in polling mode
 _TF_INTERVALS = {"1m": 5, "3m": 15, "5m": 25}
 
