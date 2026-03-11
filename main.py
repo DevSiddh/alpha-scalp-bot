@@ -1045,6 +1045,10 @@ async def run_bot_ws() -> None:
     logger.info("Dispatcher started - bot is LIVE in WebSocket mode")
 
     # --- Keep alive until shutdown ----------------------------------------
+    bot_start_time = time.time()
+    last_heartbeat = bot_start_time
+    HEARTBEAT_INTERVAL = 1800  # 30 minutes
+
     while not shutdown_event.is_set():
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=30.0)
@@ -1059,6 +1063,42 @@ async def run_bot_ws() -> None:
                     "[WS] Dispatcher: runs=%d errors=%d dropped=%d avg=%.1fms",
                     d_metrics["pipeline_runs"], d_metrics["pipeline_errors"],
                     d_metrics["events_dropped"], d_metrics["avg_pipeline_ms"],
+                )
+
+            # --- Periodic heartbeat alert (every 30 min) ------------------
+            now_hb = time.time()
+            if now_hb - last_heartbeat >= HEARTBEAT_INTERVAL:
+                last_heartbeat = now_hb
+                uptime_secs = int(now_hb - bot_start_time)
+                hours, remainder = divmod(uptime_secs, 3600)
+                mins, _ = divmod(remainder, 60)
+                uptime_str = f"{hours}h {mins}m"
+
+                # Gather latest state for heartbeat
+                last_result = last_scoring.get(cfg.SYMBOL, {})
+                hb_signal = last_result.get("action", "HOLD")
+                hb_score = last_result.get("score", 0.0)
+                hb_regime = last_result.get("regime", "UNKNOWN")
+                hb_book_ok = market_state.book.initialized if hasattr(market_state, "book") else True
+                hb_spread = 0.0
+                try:
+                    book_snap = market_state.get_book_snapshot()
+                    hb_spread = book_snap.get("spread_bps", 0.0)
+                except Exception:
+                    pass
+                session_stats = tracker.get_session_stats()
+                hb_trades = session_stats.get("total_trades", 0)
+                hb_pnl = session_stats.get("total_pnl", 0.0)
+
+                await alerts.send_heartbeat(
+                    uptime_str=uptime_str,
+                    last_signal=hb_signal,
+                    last_score=hb_score,
+                    regime=hb_regime,
+                    book_ok=hb_book_ok,
+                    total_trades=hb_trades,
+                    session_pnl=hb_pnl,
+                    spread_bps=hb_spread if hb_spread != float("inf") else 9999.9,
                 )
 
             # Midnight reset (in case no candle fires near midnight)
