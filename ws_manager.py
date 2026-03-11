@@ -100,6 +100,9 @@ class BinanceWSManager:
         self._backoff: float = INITIAL_BACKOFF_S
         self._http_session: Optional[aiohttp.ClientSession] = None
 
+        # Snapshot rebuild guard – prevents concurrent fetches
+        self._snapshot_in_progress: bool = False
+
         # Metrics
         self._messages_received: int = 0
         self._last_message_ts: float = 0.0
@@ -301,11 +304,24 @@ class BinanceWSManager:
             self.state.on_kline(data["k"])
 
         elif "@depth" in stream:
+            # While a snapshot rebuild is in flight, buffer depth events
+            # in the OrderBook (it buffers when _initialized=False).
+            # Do NOT call on_depth → update() while rebuilding, because
+            # update() would see _last_update_id=0, detect a gap, and
+            # fire another snapshot fetch — creating an infinite loop.
+            if self._snapshot_in_progress:
+                # Still buffer the raw event so apply_snapshot can replay it
+                self.state.book._buffer.append(data)
+                return
+
             self.state.on_depth(data)
-            # If book was invalidated by sequence gap, trigger snapshot rebuild
+
+            # If book was invalidated by sequence gap, trigger ONE snapshot rebuild
             if self.state.flags.is_set("book_invalidated"):
-                logger.warning("Book sequence gap on %s — fetching new snapshot", self.symbol)
-                asyncio.create_task(self._fetch_book_snapshot())
+                self.state.flags.clear_flag("book_invalidated")
+                if not self._snapshot_in_progress:
+                    logger.warning("Book sequence gap on %s — fetching new snapshot", self.symbol)
+                    asyncio.create_task(self._guarded_snapshot_rebuild())
 
         elif "@trade" in stream:
             self.state.on_trade(data)
@@ -313,6 +329,22 @@ class BinanceWSManager:
     # ------------------------------------------------------------------
     # REST Fallbacks
     # ------------------------------------------------------------------
+
+    async def _guarded_snapshot_rebuild(self) -> None:
+        """Fetch a fresh book snapshot with a concurrency guard.
+
+        While this runs, _dispatch_message buffers depth events instead of
+        calling on_depth(), preventing the gap-detect → invalidate → re-fetch
+        infinite loop.
+        """
+        if self._snapshot_in_progress:
+            return  # another rebuild already running
+        self._snapshot_in_progress = True
+        try:
+            await self._fetch_book_snapshot()
+        finally:
+            self._snapshot_in_progress = False
+            logger.info("Snapshot rebuild complete for %s, resuming depth processing", self.symbol)
 
     async def _seed_candles(self) -> None:
         """Seed candle history from REST API before WS starts."""
@@ -341,47 +373,58 @@ class BinanceWSManager:
         except Exception as e:
             logger.error("Error seeding candles for %s: %s", self.symbol, e)
 
-    async def _fetch_book_snapshot(self, _retry: int = 0) -> None:
+    async def _fetch_book_snapshot(self) -> None:
         """Fetch depth snapshot from REST to initialize/rebuild order book.
 
         Retries up to 5 times with exponential backoff on failure.
+        Uses a simple loop instead of recursive create_task to stay within
+        the _snapshot_in_progress guard.
         """
         MAX_RETRIES = 5
-        try:
-            params = {
-                "symbol": self.symbol.upper(),
-                "limit": self.book_depth_limit,
-            }
+        for attempt in range(MAX_RETRIES + 1):
+            if not self._running:
+                return
+            try:
+                params = {
+                    "symbol": self.symbol.upper(),
+                    "limit": self.book_depth_limit,
+                }
 
-            async with self._http_session.get(DEPTH_SNAPSHOT_URL, params=params) as resp:
-                if resp.status != 200:
-                    logger.error("Failed to fetch book snapshot: HTTP %d", resp.status)
-                    if _retry < MAX_RETRIES and self._running:
-                        delay = min(2.0 * (2 ** _retry), 30.0)
-                        await asyncio.sleep(delay)
-                        asyncio.create_task(self._fetch_book_snapshot(_retry=_retry + 1))
-                    else:
-                        logger.error("Book snapshot failed after %d retries — giving up", _retry)
-                    return
+                async with self._http_session.get(DEPTH_SNAPSHOT_URL, params=params) as resp:
+                    if resp.status != 200:
+                        logger.error(
+                            "Failed to fetch book snapshot: HTTP %d (attempt %d/%d)",
+                            resp.status, attempt + 1, MAX_RETRIES + 1,
+                        )
+                        if attempt < MAX_RETRIES:
+                            delay = min(2.0 * (2 ** attempt), 30.0)
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            logger.error("Book snapshot failed after %d retries — giving up", MAX_RETRIES)
+                            return
 
-                snapshot = await resp.json()
-                self.state.book.apply_snapshot(snapshot)
-                logger.info(
-                    "Book snapshot applied for %s: lastUpdateId=%s",
-                    self.symbol, snapshot.get("lastUpdateId"),
-                )
+                    snapshot = await resp.json()
+                    self.state.book.apply_snapshot(snapshot)
+                    logger.info(
+                        "Book snapshot applied for %s: lastUpdateId=%s",
+                        self.symbol, snapshot.get("lastUpdateId"),
+                    )
+                    return  # success
 
-        except Exception as e:
-            logger.error("Error fetching book snapshot for %s: %s", self.symbol, e)
-            if _retry < MAX_RETRIES and self._running:
-                delay = min(2.0 * (2 ** _retry), 30.0)
-                await asyncio.sleep(delay)
-                asyncio.create_task(self._fetch_book_snapshot(_retry=_retry + 1))
-            else:
+            except Exception as e:
                 logger.error(
-                    "Book snapshot failed after %d retries for %s — giving up",
-                    _retry, self.symbol,
+                    "Error fetching book snapshot for %s: %s (attempt %d/%d)",
+                    self.symbol, e, attempt + 1, MAX_RETRIES + 1,
                 )
+                if attempt < MAX_RETRIES:
+                    delay = min(2.0 * (2 ** attempt), 30.0)
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        "Book snapshot failed after %d retries for %s — giving up",
+                        MAX_RETRIES, self.symbol,
+                    )
 
     # ------------------------------------------------------------------
     # Health Monitoring
