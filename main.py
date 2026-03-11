@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 from datetime import datetime, timezone
 
 import ccxt
@@ -28,7 +29,11 @@ from risk_engine import RiskEngine
 from strategy import ScalpStrategy, Signal
 from swing_strategy import SwingStrategy, SwingSignal
 from telegram_alerts import TelegramAlerts
-from trade_tracker import TradeTracker
+from trade_tracker_v2 import TradeTrackerV2
+from feature_cache import FeatureCache
+from alpha_engine import AlphaEngine
+from signal_scoring import SignalScoring
+from weight_optimizer import WeightOptimizer
 
 # Timeframe-aware loop intervals (seconds)
 _TF_INTERVALS = {"1m": 5, "3m": 15, "5m": 25}
@@ -159,7 +164,7 @@ def _is_new_utc_day(last_date: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 async def _stats_poller(
     alerts: TelegramAlerts,
-    tracker: TradeTracker,
+    tracker: TradeTrackerV2,
     shutdown_event: asyncio.Event,
 ) -> None:
     """Poll Telegram for /stats commands and reply with bot statistics."""
@@ -186,7 +191,7 @@ async def _stats_poller(
                         logger.info("/stats command received from chat {}", chat_id)
                         session_stats = tracker.get_session_stats()
                         cumulative_stats = tracker.get_cumulative_stats()
-                        await alerts.send_stats_message(session_stats, cumulative_stats)
+                        await alerts.send_stats(session_stats, cumulative_stats)
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -215,8 +220,20 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
     strategy = ScalpStrategy()
     executor = OrderExecutor(exchange, risk)
     alerts = TelegramAlerts()
-    tracker = TradeTracker()
+    tracker = TradeTrackerV2()
     risk.set_trade_tracker(tracker)
+
+    # ── Phase 1: Alpha Engine pipeline ──
+    feature_cache = FeatureCache()
+    alpha_engine = AlphaEngine()
+    signal_scoring = SignalScoring()
+
+    # ── Phase 2: Weight Optimizer ──
+    optimizer = WeightOptimizer(tracker)
+    last_optimize_time = 0.0
+
+    # Store last scoring result per symbol for position monitor
+    last_scoring: dict = {}
 
     # Set margin type and leverage once at startup
     executor.set_margin_type(cfg.SYMBOL)
@@ -315,67 +332,68 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
                 await asyncio.sleep(cfg.LOOP_INTERVAL)
                 continue
 
-            # 4. Generate signal
-            trade_signal = strategy.calculate_signals(df)
+            # ── Phase 1: Alpha Engine Signal Pipeline ──
+            sym = cfg.SYMBOL
+            features = feature_cache.compute(df)
+            votes = alpha_engine.generate_votes(features)
+            result = signal_scoring.score(votes, features)
 
-            # 5. Act on signal
-            if trade_signal.signal in (Signal.BUY, Signal.SELL):
-                # Check if we can open a new position
-                can_trade = risk.check_max_positions()
-                if not can_trade:
-                    logger.info("Max positions reached – skipping signal")
-                else:
-                    side = trade_signal.signal.value.lower()  # "buy" / "sell"
-                    entry = trade_signal.entry_price
+            logger.info(
+                "Alpha signal | {} | score={:+.2f} confidence={:.0f}% action={} regime={}",
+                sym, result.score, result.confidence * 100,
+                result.action, result.regime,
+            )
 
-                    atr_val = getattr(trade_signal, 'atr', 0.0)
-                    sl = risk.get_stop_loss(entry, side, atr=atr_val)
-                    tp = risk.get_take_profit(entry, side, atr=atr_val)
-                    size = risk.calculate_position_size(entry, sl)
+            if result.action in ("BUY", "SELL"):
+                side = "long" if result.action == "BUY" else "short"
+                entry = features.close
+                atr_val = features.atr
 
-                    if size > 0:
-                        logger.info(
-                            "Executing {} | entry={:.2f} | SL={:.2f} | TP={:.2f} | size={:.6f}",
-                            side.upper(),
-                            entry,
-                            sl,
-                            tp,
-                            size,
-                        )
+                # Store scoring for position monitor to use on close
+                last_scoring[sym] = result.as_dict()
 
-                        order = executor.open_position(
-                            symbol=cfg.SYMBOL,
-                            side=side,
-                            amount=size,
+                # Risk-managed SL/TP using ATR + regime
+                sl = risk.get_stop_loss(entry, side, atr=atr_val, regime=result.regime)
+                tp = risk.get_take_profit(entry, side, atr=atr_val, regime=result.regime)
+
+                # Confidence-scaled position size
+                base_size = risk.calculate_position_size(entry, sl)
+                confidence_scale = 0.5 + (result.confidence * 0.5)  # 50%-100% of base
+                size = round(base_size * confidence_scale, 6)
+
+                can_trade, gate_reason = risk.can_open_trade()
+                if size > 0 and can_trade:
+                    logger.info(
+                        "Opening {} {} | entry={:.2f} sl={:.2f} tp={:.2f} | "
+                        "size={:.6f} (conf_scale={:.0f}%) | score={:+.2f}",
+                        side.upper(), sym, entry, sl, tp,
+                        size, confidence_scale * 100, result.score,
+                    )
+                    order = executor.open_position(
+                        symbol=sym, side=side, amount=size,
+                        stop_loss=sl, take_profit=tp,
+                        expected_entry=entry,
+                    )
+                    if order:
+                        risk.invalidate_balance_cache()
+                        await alerts.send_trade_alert(
+                            side="BUY" if side == "long" else "SELL",
+                            symbol=sym,
+                            entry_price=entry,
                             stop_loss=sl,
                             take_profit=tp,
-                            expected_entry=entry,  # Fix 1: slippage check
+                            size=size,
+                            leverage=cfg.LEVERAGE,
+                            strategy="scalp",
+                            regime=result.regime,
+                            confidence=result.confidence,
+                            atr_value=atr_val,
                         )
-
-                        # Invalidate balance cache after trade execution
-                        risk.invalidate_balance_cache()
-
-                        if order:
-                            fill_price = float(order.get("_fill_price", entry))
-                            actual_sl = float(order.get("_actual_sl", sl))
-                            actual_tp = float(order.get("_actual_tp", tp))
-                            await alerts.send_trade_alert(
-                                side=side,
-                                symbol=cfg.SYMBOL,
-                                entry=fill_price,
-                                sl=actual_sl,
-                                tp=actual_tp,
-                                size=size,
-                            )
-                        else:
-                            logger.warning(
-                                "Order returned None – slippage reject or bracket failure"
-                            )
-                    else:
-                        logger.warning("Position size is 0 – skipping")
+                elif size > 0:
+                    logger.warning("Trade blocked by risk gate: {}", gate_reason)
 
             # ========== SWING TRADING CHECK ==========
-            import time as _time
+            _time = time
             if cfg.SWING_ENABLED and swing_strategy is not None:
                 now_ts = _time.time()
                 if now_ts - last_swing_check >= cfg.SWING_CHECK_INTERVAL:
@@ -451,7 +469,7 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
                                 continue
 
             # ========== POSITION MONITOR (SL/TP detection) ==========
-            import time as _time2
+            _time2 = time
             now_pm = _time2.time()
             if now_pm - last_position_check >= cfg.POSITION_MONITOR_INTERVAL:
                 last_position_check = now_pm
@@ -485,7 +503,7 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
                             else:
                                 reason = "tp" if exit_price < entry_p else "sl"
 
-                            record = await risk.record_trade_full(
+                            record = await tracker.record_trade(
                                 symbol=sym,
                                 side=side,
                                 trade_type=trade_type,
@@ -494,19 +512,21 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
                                 size=old["contracts"],
                                 reason=reason,
                                 entry_time=old.get("entry_time"),
+                                scoring=last_scoring.get(sym),
                             )
+                            risk.record_trade_pnl(record["pnl_usdt"], record["is_win"])
                             risk.invalidate_balance_cache()
 
                             if record:
-                                await alerts.send_trade_close_alert(
-                                    symbol=sym,
+                                await alerts.send_close_alert(
                                     side=side,
-                                    trade_type=trade_type,
+                                    symbol=sym,
                                     entry_price=entry_p,
                                     exit_price=exit_price,
-                                    pnl_usdt=record["pnl_usdt"],
+                                    pnl=record["pnl_usdt"],
                                     pnl_pct=record["pnl_pct"],
-                                    reason=reason,
+                                    strategy=trade_type,
+                                    exit_reason=reason.upper(),
                                 )
 
                         elif not was_known and current_pos is not None:
@@ -530,6 +550,22 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
 
                     except Exception as mon_exc:
                         logger.debug("[MONITOR] Error checking {}: {}", sym, mon_exc)
+
+            # ── Phase 2: Periodic weight optimization (weekly) ──
+            _time_opt = time
+            now_opt = _time_opt.time()
+            if now_opt - last_optimize_time >= 86400 * 7:  # 7 days
+                if len(tracker._trades) >= 50:
+                    try:
+                        logger.info("Starting weight optimization cycle...")
+                        success = await optimizer.run_optimization_cycle()
+                        if success:
+                            signal_scoring._load_weights()  # reload updated weights
+                            logger.info("Weight optimization completed successfully")
+                        last_optimize_time = now_opt
+                    except Exception as opt_exc:
+                        logger.error("Weight optimization failed: {}", opt_exc)
+                        last_optimize_time = now_opt  # don't retry immediately
 
         # --- Fix 3: Fatal error = shutdown, transient = retry ---
         except FatalExchangeError as exc:
