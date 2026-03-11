@@ -120,6 +120,13 @@ ADX_RANGE_THRESHOLD: float = _env("ADX_RANGE_THRESHOLD", "20.0", cast=float)
 # ===== PREMIUM: Scalp ATR Trailing Stop =====================================
 SCALP_TRAIL_ACTIVATE_PCT: float = _env("SCALP_TRAIL_ACTIVATE_PCT", "0.004", cast=float)
 SCALP_TRAIL_ATR_MULT: float = _env("SCALP_TRAIL_ATR_MULT", "1.0", cast=float)
+# Trail delta: once trail activates at +0.4%, lock stop at +0.2% (covers fees)
+SCALP_TRAIL_DELTA_PCT: float = _env("SCALP_TRAIL_DELTA_PCT", "0.002", cast=float)
+
+# ===== PREMIUM: Scalp Time Stop (max hold duration) =========================
+# Force-close scalp positions after N seconds if TP/SL not hit.
+# Edge from microstructure signals decays fast -- 180s = 3 candles on 1m.
+SCALP_MAX_HOLD_SECONDS: int = _env("SCALP_MAX_HOLD_SECONDS", "180", cast=int)
 
 # ===== PREMIUM: Concurrent Trade Limiter ====================================
 MAX_CONCURRENT_TRADES: int = _env("MAX_CONCURRENT_TRADES", "3", cast=int)
