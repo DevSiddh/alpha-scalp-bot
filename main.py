@@ -1,11 +1,26 @@
-"""Alpha-Scalp Bot – Main Entry Point.
+"""Alpha-Scalp Bot -- Main Entry Point.
 
-Orchestrates the full scalping loop:
-1. Initialise exchange, strategy, risk engine, order executor, alerts
-2. Continuously fetch candles, generate signals, execute trades
-3. Enforce kill-switch and daily reset at UTC midnight
-4. Graceful shutdown on SIGINT / SIGTERM
-5. Fatal error classification – auto-shutdown on auth/permission errors
+Orchestrates the full scalping loop in TWO modes:
+
+A) **WebSocket mode** (cfg.USE_WEBSOCKET = True, default)
+   MarketState <- BinanceWSManager (kline + depth + trade streams)
+   StateChangeDispatcher reads change-flags and fires callbacks:
+     candle_complete  -> full alpha pipeline (features -> votes -> score -> trade)
+     book_update      -> refresh spread/imbalance for spread guard
+     price_jump       -> urgent re-score of last signal
+     book_invalidated -> pause trading until book rebuilds
+
+B) **Polling mode** (cfg.USE_WEBSOCKET = False, fallback)
+   Original REST polling loop (fetch_ohlcv every N seconds).
+
+Both modes share:
+  - RiskEngine, OrderExecutor, TelegramAlerts, TradeTrackerV2
+  - Alpha Engine pipeline (FeatureCache -> AlphaEngine -> SignalScoring)
+  - WeightOptimizer (weekly, triggers at 30 trades)
+  - Position monitor (SL/TP detection)
+  - Swing trading
+  - Kill switch + daily reset
+  - Graceful shutdown on SIGINT / SIGTERM
 
 Usage:
     python main.py
@@ -35,7 +50,17 @@ from alpha_engine import AlphaEngine
 from signal_scoring import SignalScoring
 from weight_optimizer import WeightOptimizer
 
-# Timeframe-aware loop intervals (seconds)
+# WebSocket imports (only used when cfg.USE_WEBSOCKET is True)
+try:
+    from market_state import MarketState
+    from ws_manager import BinanceWSManager
+    from state_dispatcher import StateChangeDispatcher, PipelineCallbacks
+    _WS_AVAILABLE = True
+except ImportError as _ws_err:
+    _WS_AVAILABLE = False
+    logger.warning("WebSocket modules not available: {} - falling back to polling", _ws_err)
+
+# Timeframe-aware loop intervals (seconds) -- used in polling mode
 _TF_INTERVALS = {"1m": 5, "3m": 15, "5m": 25}
 
 
@@ -204,8 +229,8 @@ async def _stats_poller(
 # ---------------------------------------------------------------------------
 # Main async loop
 # ---------------------------------------------------------------------------
-async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
-    """Core trading loop."""
+async def run_bot_polling() -> None:  # noqa: C901
+    """Original REST polling loop (fallback when WS is disabled)."""    
 
     # --- Initialisation ---------------------------------------------------
     logger.info("Initialising Alpha-Scalp Bot (Binance Futures)...")
@@ -314,16 +339,16 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
 
             # 2. Kill switch (also refreshes balance cache for this loop)
             if risk.check_kill_switch():
-                if not getattr(run_bot, "_ks_alerted", False):
+                if not getattr(run_bot_polling, "_ks_alerted", False):
                     await alerts.send_kill_switch_alert()
-                    run_bot._ks_alerted = True  # type: ignore[attr-defined]
+                    run_bot_polling._ks_alerted = True  # type: ignore[attr-defined]
                 logger.warning(
                     "Kill switch active – sleeping {} s", cfg.LOOP_INTERVAL * 12
                 )
                 await asyncio.sleep(cfg.LOOP_INTERVAL * 12)  # back off
                 continue
             else:
-                run_bot._ks_alerted = False  # type: ignore[attr-defined]
+                run_bot_polling._ks_alerted = False  # type: ignore[attr-defined]
 
             # 3. Fetch candles
             df = fetch_ohlcv(exchange)
@@ -555,7 +580,7 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
             _time_opt = time
             now_opt = _time_opt.time()
             if now_opt - last_optimize_time >= 86400 * 7:  # 7 days
-                if len(tracker._trades) >= 50:
+                if len(tracker._trades) >= 30:
                     try:
                         logger.info("Starting weight optimization cycle...")
                         success = await optimizer.run_optimization_cycle()
@@ -614,15 +639,493 @@ async def run_bot() -> None:  # noqa: C901 – intentionally cohesive
     logger.info("Alpha-Scalp Bot stopped.")
 
 
+# ===================================================================== #
+#                   MODE A: WEBSOCKET EVENT-DRIVEN                       #
+# ===================================================================== #
+
+async def run_bot_ws() -> None:
+    """WebSocket-driven event loop.
+
+    Architecture:
+        BinanceWSManager -> MarketState -> StateChangeDispatcher -> Callbacks
+                                                                      |
+                                                            Alpha Pipeline -> Trade
+    """
+    if not _WS_AVAILABLE:
+        logger.error("WebSocket modules not importable - cannot start WS mode")
+        sys.exit(1)
+
+    logger.info("Initialising Alpha-Scalp Bot (WebSocket mode)...")
+
+    # --- Core components (same as polling) --------------------------------
+    try:
+        exchange = _create_exchange()
+    except Exception as exc:
+        logger.critical("Exchange init failed: {}", exc)
+        sys.exit(1)
+
+    risk = RiskEngine(exchange)
+    executor = OrderExecutor(exchange, risk)
+    alerts = TelegramAlerts()
+    tracker = TradeTrackerV2()
+    risk.set_trade_tracker(tracker)
+
+    feature_cache = FeatureCache()
+    alpha_engine = AlphaEngine()
+    signal_scoring = SignalScoring()
+    optimizer = WeightOptimizer(tracker)
+    last_optimize_time = 0.0
+    last_scoring: dict = {}
+
+    executor.set_margin_type(cfg.SYMBOL)
+    executor.set_leverage(cfg.SYMBOL, cfg.LEVERAGE)
+
+    # Swing init
+    swing_strategy = SwingStrategy() if cfg.SWING_ENABLED else None
+    last_swing_check = 0.0
+    if cfg.SWING_ENABLED:
+        for sym in cfg.SWING_SYMBOLS:
+            executor.set_margin_type(sym)
+            executor.set_leverage(sym, cfg.SWING_LEVERAGE)
+        logger.info("Swing trading ENABLED for {} symbols", len(cfg.SWING_SYMBOLS))
+
+    # Position monitor state
+    known_positions: dict[str, dict] = {}
+    last_position_check: float = 0.0
+    all_monitored_symbols = [cfg.SYMBOL]
+    if cfg.SWING_ENABLED:
+        all_monitored_symbols.extend(s for s in cfg.SWING_SYMBOLS if s != cfg.SYMBOL)
+    for sym in all_monitored_symbols:
+        pos_info = executor.get_position_info(sym)
+        if pos_info:
+            known_positions[sym] = {
+                "side": pos_info["side"],
+                "entry_price": pos_info["entry_price"],
+                "contracts": pos_info["contracts"],
+                "entry_time": datetime.now(timezone.utc).isoformat(),
+            }
+    logger.info("Position monitor: {} known positions at startup", len(known_positions))
+
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # --- Shutdown ---------------------------------------------------------
+    shutdown_event = asyncio.Event()
+
+    def _handle_signal(sig: int, _frame) -> None:
+        sig_name = signal.Signals(sig).name
+        logger.warning("Received {} - initiating graceful shutdown", sig_name)
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    # --- MarketState + WSManager ------------------------------------------
+    market_state = MarketState(
+        symbol=cfg.SYMBOL,
+        candle_history=cfg.WS_CANDLE_HISTORY,
+        book_depth=cfg.WS_BOOK_DEPTH,
+        price_jump_threshold_bps=cfg.WS_PRICE_JUMP_BPS,
+    )
+
+    ws_manager = BinanceWSManager(
+        state=market_state,
+        interval=cfg.TIMEFRAME,
+        book_depth_limit=cfg.WS_BOOK_DEPTH * 50,
+        on_connected=lambda: logger.info("WS connected for {}", cfg.SYMBOL),
+        on_disconnected=lambda: logger.warning("WS disconnected for {}", cfg.SYMBOL),
+    )
+
+    # --- Pipeline callbacks -----------------------------------------------
+
+    async def on_candle_complete(state: MarketState, meta: dict) -> None:
+        """Full alpha pipeline on each completed candle."""
+        nonlocal last_optimize_time, current_date, last_swing_check, last_position_check
+
+        # Midnight reset
+        is_new_day, today = _is_new_utc_day(current_date)
+        if is_new_day:
+            logger.info("UTC midnight crossed - resetting daily stats")
+            cumulative = tracker.get_cumulative_stats()
+            summary = risk.reset_daily()
+            await alerts.send_daily_summary(
+                pnl=summary["pnl"], trades=summary["trades"],
+                win_rate=summary["win_rate"],
+                start_balance=summary["start_balance"],
+                end_balance=summary["end_balance"],
+                cumulative_stats=cumulative,
+            )
+            current_date = today
+
+        # Kill switch
+        if risk.check_kill_switch():
+            if not getattr(run_bot_ws, "_ks_alerted", False):
+                await alerts.send_kill_switch_alert()
+                run_bot_ws._ks_alerted = True
+            logger.warning("Kill switch active - skipping candle")
+            return
+        else:
+            run_bot_ws._ks_alerted = False
+
+        # Get candle DataFrame from MarketState
+        df = state.get_candle_df()
+        if df is None or len(df) < 50:
+            logger.warning("WS: Not enough candles yet ({}/50)", len(df) if df is not None else 0)
+            return
+
+        # Alpha pipeline
+        sym = cfg.SYMBOL
+        features = feature_cache.compute(df)
+        votes = alpha_engine.generate_votes(features)
+        result = signal_scoring.score(votes, features)
+
+        logger.info(
+            "[WS] Alpha signal | {} | score={:+.2f} confidence={:.0f}% action={} regime={}",
+            sym, result.score, result.confidence * 100, result.action, result.regime,
+        )
+
+        # Execute trade (same logic as polling mode)
+        if result.action in ("BUY", "SELL"):
+            side = "long" if result.action == "BUY" else "short"
+            entry = features.close
+            atr_val = features.atr
+            last_scoring[sym] = result.as_dict()
+
+            sl = risk.get_stop_loss(entry, side, atr=atr_val, regime=result.regime)
+            tp = risk.get_take_profit(entry, side, atr=atr_val, regime=result.regime)
+            base_size = risk.calculate_position_size(entry, sl)
+            confidence_scale = 0.5 + (result.confidence * 0.5)
+            size = round(base_size * confidence_scale, 6)
+
+            can_trade, gate_reason = risk.can_open_trade()
+            if size > 0 and can_trade:
+                logger.info(
+                    "Opening {} {} | entry={:.2f} sl={:.2f} tp={:.2f} | "
+                    "size={:.6f} (conf_scale={:.0f}%) | score={:+.2f}",
+                    side.upper(), sym, entry, sl, tp,
+                    size, confidence_scale * 100, result.score,
+                )
+                order = executor.open_position(
+                    symbol=sym, side=side, amount=size,
+                    stop_loss=sl, take_profit=tp, expected_entry=entry,
+                )
+                if order:
+                    risk.invalidate_balance_cache()
+                    await alerts.send_trade_alert(
+                        side="BUY" if side == "long" else "SELL",
+                        symbol=sym, entry_price=entry,
+                        stop_loss=sl, take_profit=tp, size=size,
+                        leverage=cfg.LEVERAGE, strategy="scalp",
+                        regime=result.regime, confidence=result.confidence,
+                        atr_value=atr_val,
+                    )
+            elif size > 0:
+                logger.warning("Trade blocked by risk gate: {}", gate_reason)
+
+        # Swing check
+        if cfg.SWING_ENABLED and swing_strategy is not None:
+            now_ts = time.time()
+            if now_ts - last_swing_check >= cfg.SWING_CHECK_INTERVAL:
+                last_swing_check = now_ts
+                try:
+                    logger.info("[SWING] Running swing check across {} symbols...", len(cfg.SWING_SYMBOLS))
+                    if risk.check_swing_max_positions(cfg.SWING_SYMBOLS) and risk.check_swing_total_exposure():
+                        for swing_sym in cfg.SWING_SYMBOLS:
+                            try:
+                                if risk.check_swing_symbol_position(swing_sym):
+                                    continue
+                                swing_df = fetch_swing_ohlcv(exchange, swing_sym)
+                                if swing_df is None or swing_df.empty:
+                                    continue
+                                swing_signal = swing_strategy.calculate_signals(swing_df, swing_sym)
+                                if swing_signal.signal in (SwingSignal.BUY, SwingSignal.SELL):
+                                    s_side = swing_signal.signal.value.lower()
+                                    s_entry = swing_signal.entry_price
+                                    s_sl = risk.get_swing_stop_loss(s_entry, s_side, swing_sym, atr=swing_signal.atr)
+                                    s_tp = risk.get_swing_take_profit(s_entry, s_side, swing_sym)
+                                    s_size = risk.calculate_swing_position_size(s_entry, s_sl)
+                                    if s_size > 0:
+                                        order = executor.open_position(
+                                            symbol=swing_sym, side=s_side, amount=s_size,
+                                            stop_loss=s_sl, take_profit=s_tp, expected_entry=s_entry,
+                                        )
+                                        risk.invalidate_balance_cache()
+                                        if order:
+                                            fill_price = float(order.get("_fill_price", s_entry))
+                                            actual_sl = float(order.get("_actual_sl", s_sl))
+                                            actual_tp = float(order.get("_actual_tp", s_tp))
+                                            await alerts.send_swing_trade_alert(
+                                                side=s_side, symbol=swing_sym,
+                                                entry=fill_price, sl=actual_sl, tp=actual_tp,
+                                                size=s_size, confidence=swing_signal.confidence,
+                                                reason=swing_signal.reason,
+                                            )
+                            except FatalExchangeError:
+                                raise
+                            except Exception as swing_exc:
+                                logger.error("[SWING] Error processing {}: {}", swing_sym, swing_exc)
+                except FatalExchangeError:
+                    raise
+                except Exception as exc:
+                    logger.error("[SWING] Error in swing check: {}", exc)
+
+        # Position monitor
+        now_pm = time.time()
+        if now_pm - last_position_check >= cfg.POSITION_MONITOR_INTERVAL:
+            last_position_check = now_pm
+            for sym in all_monitored_symbols:
+                try:
+                    current_pos = executor.get_position_info(sym)
+                    was_known = sym in known_positions
+                    if was_known and current_pos is None:
+                        old = known_positions.pop(sym)
+                        try:
+                            ticker = exchange.fetch_ticker(sym)
+                            exit_price = float(ticker.get("last", old["entry_price"]))
+                        except Exception:
+                            exit_price = old["entry_price"]
+                        trade_type = "swing" if sym in cfg.SWING_SYMBOLS and sym != cfg.SYMBOL else "scalp"
+                        entry_p = old["entry_price"]
+                        p_side = old["side"]
+                        reason = ("tp" if exit_price > entry_p else "sl") if p_side == "long" else ("tp" if exit_price < entry_p else "sl")
+                        record = await tracker.record_trade(
+                            symbol=sym, side=p_side, trade_type=trade_type,
+                            entry_price=entry_p, exit_price=exit_price,
+                            size=old["contracts"], reason=reason,
+                            entry_time=old.get("entry_time"), scoring=last_scoring.get(sym),
+                        )
+                        risk.record_trade_pnl(record["pnl_usdt"], record["is_win"])
+                        risk.invalidate_balance_cache()
+                        if record:
+                            await alerts.send_close_alert(
+                                side=p_side, symbol=sym, entry_price=entry_p,
+                                exit_price=exit_price, pnl=record["pnl_usdt"],
+                                pnl_pct=record["pnl_pct"], strategy=trade_type,
+                                exit_reason=reason.upper(),
+                            )
+                    elif not was_known and current_pos is not None:
+                        known_positions[sym] = {
+                            "side": current_pos["side"],
+                            "entry_price": current_pos["entry_price"],
+                            "contracts": current_pos["contracts"],
+                            "entry_time": datetime.now(timezone.utc).isoformat(),
+                        }
+                    elif was_known and current_pos is not None:
+                        known_positions[sym]["contracts"] = current_pos["contracts"]
+                        known_positions[sym]["entry_price"] = current_pos["entry_price"]
+                except Exception as mon_exc:
+                    logger.debug("[MONITOR] Error checking {}: {}", sym, mon_exc)
+
+        # Weight optimizer (weekly, 30 trades threshold)
+        now_opt = time.time()
+        if now_opt - last_optimize_time >= 86400 * 7:
+            if len(tracker._trades) >= 30:
+                try:
+                    logger.info("Starting weight optimization cycle...")
+                    success = await optimizer.run_optimization_cycle()
+                    if success:
+                        signal_scoring._load_weights()
+                        logger.info("Weight optimization completed successfully")
+                    last_optimize_time = now_opt
+                except Exception as opt_exc:
+                    logger.error("Weight optimization failed: {}", opt_exc)
+                    last_optimize_time = now_opt
+
+    async def on_book_update(state: MarketState, meta: dict) -> None:
+        """Lightweight spread/imbalance refresh on book updates."""
+        book = state.get_book_snapshot()
+        spread_bps = book.get("spread_bps", float("inf"))
+        imbalance = book.get("imbalance", 0.5)
+        if spread_bps > 50:
+            logger.warning("[WS] Wide spread: {:.1f} bps | imbalance={:.2f}", spread_bps, imbalance)
+
+    async def on_price_jump(state: MarketState, meta: dict) -> None:
+        """Urgent re-score on large price moves."""
+        direction = meta.get("direction", "unknown")
+        move_bps = meta.get("move_bps", 0)
+        logger.info("[WS] Price jump {} {:.1f} bps - re-scoring", direction, move_bps)
+
+        df = state.get_candle_df()
+        if df is None or len(df) < 50:
+            return
+
+        features = feature_cache.compute(df)
+        votes = alpha_engine.generate_votes(features)
+        result = signal_scoring.score(votes, features)
+
+        # Only act if confidence is very high on a price jump
+        if result.confidence >= 0.8 and result.action in ("BUY", "SELL"):
+            logger.info(
+                "[WS] Price jump re-score: {} confidence={:.0f}% - executing",
+                result.action, result.confidence * 100,
+            )
+            side = "long" if result.action == "BUY" else "short"
+            entry = features.close
+            atr_val = features.atr
+            last_scoring[cfg.SYMBOL] = result.as_dict()
+            sl = risk.get_stop_loss(entry, side, atr=atr_val, regime=result.regime)
+            tp = risk.get_take_profit(entry, side, atr=atr_val, regime=result.regime)
+            base_size = risk.calculate_position_size(entry, sl)
+            confidence_scale = 0.5 + (result.confidence * 0.5)
+            size = round(base_size * confidence_scale, 6)
+            can_trade, gate_reason = risk.can_open_trade()
+            if size > 0 and can_trade:
+                order = executor.open_position(
+                    symbol=cfg.SYMBOL, side=side, amount=size,
+                    stop_loss=sl, take_profit=tp, expected_entry=entry,
+                )
+                if order:
+                    risk.invalidate_balance_cache()
+                    await alerts.send_trade_alert(
+                        side="BUY" if side == "long" else "SELL",
+                        symbol=cfg.SYMBOL, entry_price=entry,
+                        stop_loss=sl, take_profit=tp, size=size,
+                        leverage=cfg.LEVERAGE, strategy="scalp",
+                        regime=result.regime, confidence=result.confidence,
+                        atr_value=atr_val,
+                    )
+
+    async def on_book_invalidated(state: MarketState, meta: dict) -> None:
+        """Pause trading when order book has a sequence gap."""
+        logger.warning(
+            "[WS] Order book INVALIDATED for {} - trading paused until rebuild",
+            cfg.SYMBOL,
+        )
+        await alerts.send_error_alert(
+            f"Order book invalidated for {cfg.SYMBOL} - trading paused, awaiting snapshot rebuild"
+        )
+
+    # --- Assemble dispatcher ----------------------------------------------
+    callbacks = PipelineCallbacks(
+        on_candle_complete=on_candle_complete,
+        on_book_update=on_book_update,
+        on_price_jump=on_price_jump,
+        on_book_invalidated=on_book_invalidated,
+    )
+
+    dispatcher = StateChangeDispatcher(
+        state=market_state,
+        callbacks=callbacks,
+        queue_maxsize=1000,
+        poll_interval_ms=50.0,
+        coalesce_window_ms=100.0,
+        max_processing_time_s=5.0,
+    )
+
+    # --- Start everything -------------------------------------------------
+    await alerts.send_startup_message()
+
+    stats_task = asyncio.create_task(
+        _stats_poller(alerts, tracker, shutdown_event)
+    )
+
+    await ws_manager.start()
+    logger.info("WebSocket manager started - waiting for market data...")
+
+    # Wait for MarketState to be ready (enough candles seeded)
+    for _ in range(60):
+        if market_state.is_ready:
+            break
+        await asyncio.sleep(1)
+
+    if not market_state.is_ready:
+        logger.warning(
+            "MarketState not fully ready after 60s (candles=%d, book=%s) - starting dispatcher anyway",
+            market_state.candles.history_len,
+            market_state.book.initialized,
+        )
+    else:
+        logger.info(
+            "MarketState ready: %d candles, book %s, last price=%.2f",
+            market_state.candles.history_len,
+            "OK" if market_state.book.initialized else "pending",
+            market_state.last_trade_price,
+        )
+
+    await dispatcher.start()
+    logger.info("Dispatcher started - bot is LIVE in WebSocket mode")
+
+    # --- Keep alive until shutdown ----------------------------------------
+    while not shutdown_event.is_set():
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            # Health check
+            if not ws_manager.is_healthy:
+                logger.warning("[WS] Health check FAILED: %s", ws_manager.metrics())
+
+            d_metrics = dispatcher.metrics()
+            if d_metrics.get("pipeline_runs", 0) > 0:
+                logger.info(
+                    "[WS] Dispatcher: runs=%d errors=%d dropped=%d avg=%.1fms",
+                    d_metrics["pipeline_runs"], d_metrics["pipeline_errors"],
+                    d_metrics["events_dropped"], d_metrics["avg_pipeline_ms"],
+                )
+
+            # Midnight reset (in case no candle fires near midnight)
+            is_new_day, today = _is_new_utc_day(current_date)
+            if is_new_day:
+                cumulative = tracker.get_cumulative_stats()
+                summary = risk.reset_daily()
+                await alerts.send_daily_summary(
+                    pnl=summary["pnl"], trades=summary["trades"],
+                    win_rate=summary["win_rate"],
+                    start_balance=summary["start_balance"],
+                    end_balance=summary["end_balance"],
+                    cumulative_stats=cumulative,
+                )
+                current_date = today
+
+    # --- Graceful shutdown ------------------------------------------------
+    logger.info("Shutting down WebSocket mode...")
+    await dispatcher.stop()
+    await ws_manager.stop()
+
+    stats_task.cancel()
+    try:
+        await stats_task
+    except asyncio.CancelledError:
+        pass
+
+    logger.info("Closing open positions...")
+    try:
+        executor.close_position(cfg.SYMBOL)
+        executor.cancel_all_orders(cfg.SYMBOL)
+        if cfg.SWING_ENABLED:
+            for sym in cfg.SWING_SYMBOLS:
+                try:
+                    executor.close_position(sym)
+                    executor.cancel_all_orders(sym)
+                except Exception as swing_exc:
+                    logger.error("Swing cleanup error for {}: {}", sym, swing_exc)
+    except Exception as exc:
+        logger.error("Cleanup error: {}", exc)
+
+    await alerts.send_shutdown_message(reason="Graceful shutdown (signal)")
+    logger.info("Alpha-Scalp Bot stopped (WebSocket mode).")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main() -> None:
-    """Synchronous entry point."""
+    """Synchronous entry point - picks WS or polling mode."""
+    use_ws = cfg.USE_WEBSOCKET and _WS_AVAILABLE
+
+    if cfg.USE_WEBSOCKET and not _WS_AVAILABLE:
+        logger.warning(
+            "USE_WEBSOCKET=true but WS modules not importable - falling back to polling"
+        )
+
+    mode = "WebSocket" if use_ws else "Polling"
+    logger.info("Starting Alpha-Scalp Bot in {} mode", mode)
+
     try:
-        asyncio.run(run_bot())
+        if use_ws:
+            asyncio.run(run_bot_ws())
+        else:
+            asyncio.run(run_bot_polling())
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt – exiting")
+        logger.info("KeyboardInterrupt - exiting")
     except Exception as exc:
         logger.critical("Fatal error: {}", exc)
         sys.exit(1)
