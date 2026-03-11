@@ -281,8 +281,11 @@ class OrderBook:
             applied += 1
 
         if not self._initialized:
-            # Edge case: no buffered event bridges the snapshot
-            # Mark as initialized anyway, next live event will validate
+            # Edge case: no buffered event bridges the snapshot.
+            # Set _last_update_id = _snapshot_id so update() accepts the
+            # next live event whose U <= snapshot_id+1.  Without this,
+            # _last_update_id stays 0 and every event triggers a gap.
+            self._last_update_id = self._snapshot_id
             self._initialized = True
 
         self._buffer.clear()
