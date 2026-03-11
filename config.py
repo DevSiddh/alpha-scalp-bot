@@ -168,10 +168,33 @@ if SCALP_USE_TF_PRESETS and TIMEFRAME in _TF_PRESETS and TIMEFRAME != "1m":
     SCALP_TP_ATR_MULTIPLIER = _preset["atr_tp_mult"]
     logger.info(f"TF Preset applied for {TIMEFRAME}: EMA {EMA_FAST}/{EMA_SLOW}, RSI {RSI_PERIOD}, NW lb={NW_LOOKBACK}, SL/TP {STOP_LOSS_PCT:.2%}/{TAKE_PROFIT_PCT:.2%}")
 
+# --- Phase 2: LLM Optimization Settings ---
+# Use OpenRouter, OpenAI, or your Nebula endpoint
+LLM_API_URL = os.getenv("LLM_API_URL", "https://openrouter.ai/api/v1/chat/completions")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "your_api_key_here")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
+
+# Safety constraints for the LLM output
+MIN_WEIGHT = 0.1
+MAX_WEIGHT = 3.0
+
 # ===== Execution ============================================================
 LOOP_INTERVAL: int = _env("LOOP_INTERVAL", "5", cast=int)
 ORDER_TYPE: str = _env("ORDER_TYPE", "market")
 SLIPPAGE_TOLERANCE: float = _env("SLIPPAGE_TOLERANCE", "0.001", cast=float)
+
+# --- Spread Guard (pre-execution safety check) ---
+# Abort trade if live bid-ask spread exceeds this % of mid price
+SPREAD_GUARD_ENABLED: bool = _env("SPREAD_GUARD_ENABLED", "true", cast=bool)
+MAX_SPREAD_PCT: float = _env("MAX_SPREAD_PCT", "0.0005", cast=float)  # 0.05%
+SPREAD_GUARD_BOOK_DEPTH: int = _env("SPREAD_GUARD_BOOK_DEPTH", "5", cast=int)  # levels to fetch
+
+# ===== CVD (Cumulative Volume Delta) ========================================
+# Tracks aggressive buyer vs seller pressure from trade-level data
+CVD_ENABLED: bool = _env("CVD_ENABLED", "true", cast=bool)
+CVD_LOOKBACK: int = _env("CVD_LOOKBACK", "20", cast=int)  # bars for CVD slope
+CVD_STRONG_THRESHOLD: float = _env("CVD_STRONG_THRESHOLD", "0.6", cast=float)  # normalised, strong signal
+CVD_MILD_THRESHOLD: float = _env("CVD_MILD_THRESHOLD", "0.3", cast=float)     # normalised, mild signal
 
 # ===== Trade Tracking =======================================================
 TRADE_HISTORY_FILE: str = _env("TRADE_HISTORY_FILE", "logs/trade_history.json")
@@ -220,6 +243,8 @@ logger.info(f"BB Squeeze   : period={BB_PERIOD}, std={BB_STD}, threshold={BB_SQU
 logger.info(f"ADX Regime   : period={ADX_PERIOD}, trend>{ADX_TREND_THRESHOLD}, strong>{ADX_STRONG_TREND}")
 logger.info(f"Scalp Trail  : activate={SCALP_TRAIL_ACTIVATE_PCT:.2%}, ATR mult={SCALP_TRAIL_ATR_MULT}")
 logger.info(f"Concurrent   : max {MAX_CONCURRENT_TRADES} trades")
+logger.info(f"Spread Guard : {'ON' if SPREAD_GUARD_ENABLED else 'OFF'} (max={MAX_SPREAD_PCT:.4%}, depth={SPREAD_GUARD_BOOK_DEPTH})")
+logger.info(f"CVD Signal   : {'ON' if CVD_ENABLED else 'OFF'} (lookback={CVD_LOOKBACK}, strong={CVD_STRONG_THRESHOLD}, mild={CVD_MILD_THRESHOLD})")
 logger.info(f"Circuit Break: {DAILY_LOSS_LIMIT:.1%} daily loss limit")
 if SWING_ENABLED:
     logger.info(f"Swing Mode   : ENABLED")
