@@ -119,7 +119,18 @@ class RiskEngine:
         logger.debug("Balance cache invalidated")
 
     def _sync_daily_balance(self) -> None:
-        self.daily_start_balance = self._fetch_usdt_balance()
+        try:
+            self.daily_start_balance = self._fetch_usdt_balance()
+        except Exception:
+            # Demo/testnet API may fail — use a safe default so bot can start
+            fallback = getattr(cfg, 'INITIAL_BALANCE', 10000.0)
+            logger.warning(
+                "Balance fetch failed at startup — using fallback {:.2f} USDT",
+                fallback,
+            )
+            self.daily_start_balance = fallback
+            self._cached_balance = fallback
+            self._cache_timestamp = time.monotonic()
         self.daily_pnl = 0.0
         self.daily_realized_pnl = 0.0
         self.daily_trades = 0
@@ -138,9 +149,23 @@ class RiskEngine:
         try:
             current_balance = self.get_cached_balance()
         except Exception:
-            logger.warning("Balance read failed – activating kill switch")
-            self.kill_switch_active = True
-            return True
+            # Fallback to last known cached balance instead of killing the bot
+            if self._cached_balance > 0:
+                logger.warning(
+                    "Balance read failed – using cached balance {:.2f} USDT",
+                    self._cached_balance,
+                )
+                current_balance = self._cached_balance
+            elif self.daily_start_balance > 0:
+                logger.warning(
+                    "Balance read failed – using daily start balance {:.2f} USDT",
+                    self.daily_start_balance,
+                )
+                current_balance = self.daily_start_balance
+            else:
+                logger.warning("Balance read failed with no cached fallback – activating kill switch")
+                self.kill_switch_active = True
+                return True
 
         if self.daily_start_balance <= 0:
             logger.warning("Daily start balance is zero – activating kill switch")
