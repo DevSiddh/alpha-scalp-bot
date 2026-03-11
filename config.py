@@ -178,6 +178,14 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 MIN_WEIGHT = 0.1
 MAX_WEIGHT = 3.0
 
+# ===== WebSocket Mode =======================================================
+# Set to True to use event-driven WebSocket architecture instead of polling.
+# When False, the bot falls back to the original REST polling loop.
+USE_WEBSOCKET: bool = _env("USE_WEBSOCKET", "true", cast=bool)
+WS_BOOK_DEPTH: int = _env("WS_BOOK_DEPTH", "20", cast=int)           # order book levels to track
+WS_PRICE_JUMP_BPS: float = _env("WS_PRICE_JUMP_BPS", "15.0", cast=float)  # basis points for price jump alert
+WS_CANDLE_HISTORY: int = _env("WS_CANDLE_HISTORY", "500", cast=int)   # candles to keep in memory
+
 # ===== Execution ============================================================
 LOOP_INTERVAL: int = _env("LOOP_INTERVAL", "5", cast=int)
 ORDER_TYPE: str = _env("ORDER_TYPE", "market")
