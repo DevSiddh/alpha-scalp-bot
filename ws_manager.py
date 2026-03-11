@@ -197,7 +197,6 @@ class BinanceWSManager:
                     "WSManager error for %s: %s (reconnect #%d, backoff %.1fs)",
                     self.symbol, e, self._reconnect_count, self._backoff,
                 )
-
                 self.state.ws_connected = False
                 if self._on_disconnected:
                     try:
@@ -239,7 +238,9 @@ class BinanceWSManager:
             )
 
             if self._on_connected:
-                await self._on_connected()
+                _res = self._on_connected()
+                if _res is not None and asyncio.iscoroutine(_res):
+                    await _res
 
             # Fetch order book snapshot after connection
             await self._fetch_book_snapshot()
