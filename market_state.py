@@ -173,8 +173,9 @@ class OrderBook:
     # Maximum gap in update IDs before triggering a full invalidation.
     # Gaps smaller than this are tolerated — the missing deltas are
     # accepted as network jitter on high-throughput pairs like BTCUSDT.
-    # A gap of ~500 on Binance Futures depth is ~0.2 s of events.
-    GAP_TOLERANCE = 500
+    # Observed post-snapshot gaps: 600-700 are routine on BTC Futures.
+    # A gap of ~1000 on Binance Futures depth is ~0.4 s of events.
+    GAP_TOLERANCE = 1000
 
     def __init__(self, depth: int = 20):
         self.depth = depth
