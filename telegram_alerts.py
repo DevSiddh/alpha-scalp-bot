@@ -42,7 +42,11 @@ class TelegramAlerts:
     # Core send with rate-limit
     # =================================================================
     async def send_message(self, text: str) -> bool:
-        """Send an HTML-formatted message with rate limiting."""
+        """Send an HTML-formatted message with rate limiting.
+
+        Falls back to plain-text (no parse_mode) if Telegram rejects
+        the HTML — this prevents silent message loss from malformed tags.
+        """
         if not self.enabled:
             return False
 
@@ -63,6 +67,17 @@ class TelegramAlerts:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.post(url, json=payload)
+                    # If HTML parsing fails (400), retry without parse_mode
+                    if resp.status_code == 400:
+                        logger.warning(
+                            "Telegram 400 with HTML — retrying as plain text"
+                        )
+                        plain_payload = {
+                            "chat_id": self.chat_id,
+                            "text": text,
+                            "disable_web_page_preview": True,
+                        }
+                        resp = await client.post(url, json=plain_payload)
                     resp.raise_for_status()
                 self._last_send = asyncio.get_event_loop().time()
                 return True
