@@ -412,6 +412,11 @@ class ChangeFlags:
     def get_meta(self, flag: str) -> dict:
         return self._metadata.get(flag, {})
 
+    def clear_flag(self, flag: str) -> None:
+        """Remove a single flag (no-op if not set)."""
+        self._flags.discard(flag)
+        self._metadata.pop(flag, None)
+
     def clear(self) -> None:
         self._flags.clear()
         self._metadata.clear()
