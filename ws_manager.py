@@ -36,12 +36,15 @@ from market_state import MarketState
 logger = logging.getLogger("ws_manager")
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants – Binance Futures (fapi) endpoints
 # ---------------------------------------------------------------------------
-BINANCE_WS_BASE = "wss://stream.binance.com:9443/ws"
-BINANCE_WS_COMBINED = "wss://stream.binance.com:9443/stream"
-BINANCE_REST_BASE = "https://api.binance.com"
-DEPTH_SNAPSHOT_URL = BINANCE_REST_BASE + "/api/v3/depth"
+# Spot endpoints (/api/v3/*) return HTTP 400 for futures symbols.
+# Demo trading uses the SAME endpoints as production – routing is by API key.
+BINANCE_WS_BASE = "wss://fstream.binance.com/ws"
+BINANCE_WS_COMBINED = "wss://fstream.binance.com/stream"
+BINANCE_REST_BASE = "https://fapi.binance.com"
+DEPTH_SNAPSHOT_URL = BINANCE_REST_BASE + "/fapi/v1/depth"
+KLINES_URL = BINANCE_REST_BASE + "/fapi/v1/klines"
 
 # Reconnection
 INITIAL_BACKOFF_S = 1.0
@@ -79,7 +82,8 @@ class BinanceWSManager:
         on_disconnected: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         self.state = state
-        self.symbol = state.symbol.lower()  # Binance WS uses lowercase
+        # Binance uses no-slash lowercase for WS (btcusdt) and uppercase for REST (BTCUSDT)
+        self.symbol = state.symbol.replace("/", "").lower()
         self.interval = interval
         self.book_depth_limit = book_depth_limit
 
@@ -197,6 +201,7 @@ class BinanceWSManager:
                     "WSManager error for %s: %s (reconnect #%d, backoff %.1fs)",
                     self.symbol, e, self._reconnect_count, self._backoff,
                 )
+
                 self.state.ws_connected = False
                 if self._on_disconnected:
                     try:
@@ -312,7 +317,7 @@ class BinanceWSManager:
     async def _seed_candles(self) -> None:
         """Seed candle history from REST API before WS starts."""
         try:
-            url = f"{BINANCE_REST_BASE}/api/v3/klines"
+            url = KLINES_URL
             params = {
                 "symbol": self.symbol.upper(),
                 "interval": self.interval,
