@@ -170,6 +170,12 @@ class OrderBook:
     - Spread, mid-price, book imbalance
     """
 
+    # Maximum gap in update IDs before triggering a full invalidation.
+    # Gaps smaller than this are tolerated — the missing deltas are
+    # accepted as network jitter on high-throughput pairs like BTCUSDT.
+    # A gap of ~500 on Binance Futures depth is ~0.2 s of events.
+    GAP_TOLERANCE = 500
+
     def __init__(self, depth: int = 20):
         self.depth = depth
         self.bids: dict[float, float] = {}   # price → qty
@@ -179,6 +185,7 @@ class OrderBook:
         self._initialized: bool = False
         self._buffer: list[dict] = []        # buffered before snapshot
         self._seq_errors: int = 0
+        self._post_snapshot_grace: bool = False  # accept first event after snapshot
 
     @property
     def initialized(self) -> bool:
@@ -288,6 +295,11 @@ class OrderBook:
             self._last_update_id = self._snapshot_id
             self._initialized = True
 
+        # After a fresh snapshot, unconditionally accept the first live
+        # event — the snapshot is the best state we have, and the first
+        # event will always have a small gap due to REST round-trip latency.
+        self._post_snapshot_grace = True
+
         self._buffer.clear()
         logger.info(
             "Order book snapshot applied: id=%d, bids=%d, asks=%d, buffered_applied=%d",
@@ -316,19 +328,47 @@ class OrderBook:
         expected_next = self._last_update_id + 1
 
         if u_first > expected_next:
-            # GAP DETECTED — missed events
+            gap = u_first - expected_next
+
+            # After a fresh snapshot, unconditionally accept the first event.
+            # The REST round-trip guarantees a small gap — that's expected.
+            if self._post_snapshot_grace:
+                logger.debug(
+                    "Post-snapshot grace: accepting gap=%d (U=%d, expected=%d)",
+                    gap, u_first, expected_next,
+                )
+                self._post_snapshot_grace = False
+                self._apply_deltas(depth_event)
+                self._last_update_id = u_final
+                return True
+
+            # Tolerate small gaps — on high-throughput pairs like BTCUSDT,
+            # gaps of a few hundred IDs are normal network jitter and do
+            # not corrupt the book enough to justify a full rebuild.
+            if gap <= self.GAP_TOLERANCE:
+                logger.debug(
+                    "Tolerating small sequence gap=%d (U=%d, expected=%d)",
+                    gap, u_first, expected_next,
+                )
+                self._apply_deltas(depth_event)
+                self._last_update_id = u_final
+                return True
+
+            # Large gap — book is unreliable, need full rebuild
             self._seq_errors += 1
             logger.warning(
                 "Order book sequence gap! expected_next=%d, got U=%d (gap=%d, total_errors=%d)",
-                expected_next, u_first, u_first - expected_next, self._seq_errors,
+                expected_next, u_first, gap, self._seq_errors,
             )
             self.invalidate()
             return False
 
         if u_final < expected_next:
             # Stale event, skip
+            self._post_snapshot_grace = False
             return True
 
+        self._post_snapshot_grace = False
         self._apply_deltas(depth_event)
         self._last_update_id = u_final
         return True
@@ -367,6 +407,7 @@ class OrderBook:
         self.asks.clear()
         self._last_update_id = 0
         self._buffer.clear()
+        self._post_snapshot_grace = False
         logger.warning("Order book invalidated — awaiting fresh snapshot")
 
     def top_levels(self, n: int = 5) -> dict:
