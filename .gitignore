@@ -1,44 +1,57 @@
-# Environment / Secrets
+# ===== SECRETS (CRITICAL - NEVER COMMIT) =====
 .env
 .env.*
+*.pem
+*.key
 
-# Python
+# ===== LIVE STATE FILES (VPS-only, cause merge conflicts) =====
+trades.jsonl
+trades.json
+weights.json
+session_state.json
+trade_history/
+backtest_results/
+
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 
-# Virtual environments
+# ===== Virtual environments =====
 venv/
 .venv/
 env/
 
-# Distribution / packaging
+# ===== Distribution / packaging =====
 build/
 dist/
 *.egg-info/
 *.egg
 
-# IDE / Editor
+# ===== IDE / Editor =====
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS files
+# ===== OS files =====
 .DS_Store
 Thumbs.db
 
-# Logs
+# ===== Logs =====
 logs/
 *.log
 
-# Testing / Coverage
+# ===== Testing / Coverage =====
 .pytest_cache/
 htmlcov/
 .coverage
 .tox/
 
-# Jupyter
+# ===== Jupyter =====
 .ipynb_checkpoints/
+
+# ===== Docker (local overrides only) =====
+docker-compose.override.yml
