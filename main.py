@@ -626,6 +626,51 @@ async def run_bot_polling() -> None:  # noqa: C901
                             known_positions[sym]["contracts"] = current_pos["contracts"]
                             known_positions[sym]["entry_price"] = current_pos["entry_price"]
 
+                            # ── TIME STOP: force-close scalp if held > max seconds ──
+                            old_info = known_positions[sym]
+                            trade_type_ts = "swing" if sym in cfg.SWING_SYMBOLS and sym != cfg.SYMBOL else "scalp"
+                            if trade_type_ts == "scalp" and old_info.get("entry_time"):
+                                entry_dt = datetime.fromisoformat(old_info["entry_time"])
+                                hold_secs = (datetime.now(timezone.utc) - entry_dt).total_seconds()
+                                if hold_secs >= cfg.SCALP_MAX_HOLD_SECONDS:
+                                    logger.warning(
+                                        "[TIME STOP] {} held {:.0f}s >= {}s limit -- force closing",
+                                        sym, hold_secs, cfg.SCALP_MAX_HOLD_SECONDS,
+                                    )
+                                    close_order = executor.close_position(sym)
+                                    if close_order:
+                                        ts_exit = float(close_order.get("_exit_price", current_pos["entry_price"]))
+                                        ts_entry = old_info["entry_price"]
+                                        ts_side = old_info["side"]
+                                        record = await tracker.record_trade(
+                                            symbol=sym,
+                                            side=ts_side,
+                                            trade_type="scalp",
+                                            entry_price=ts_entry,
+                                            exit_price=ts_exit,
+                                            size=old_info["contracts"],
+                                            reason="time_stop",
+                                            entry_time=old_info.get("entry_time"),
+                                            scoring=last_scoring.get(sym),
+                                        )
+                                        risk.record_trade_pnl(record["pnl_usdt"], record["is_win"])
+                                        risk.invalidate_balance_cache()
+                                        await alerts.send_close_alert(
+                                            side=ts_side,
+                                            symbol=sym,
+                                            entry_price=ts_entry,
+                                            exit_price=ts_exit,
+                                            pnl=record["pnl_usdt"],
+                                            pnl_pct=record["pnl_pct"],
+                                            strategy="scalp",
+                                            exit_reason="TIME_STOP",
+                                        )
+                                        known_positions.pop(sym, None)
+                                        logger.info(
+                                            "[TIME STOP] {} closed | held {:.0f}s | PnL {:+.2f} USDT",
+                                            sym, hold_secs, record["pnl_usdt"],
+                                        )
+
                     except Exception as mon_exc:
                         logger.debug("[MONITOR] Error checking {}: {}", sym, mon_exc)
 
@@ -967,6 +1012,52 @@ async def run_bot_ws() -> None:
                     elif was_known and current_pos is not None:
                         known_positions[sym]["contracts"] = current_pos["contracts"]
                         known_positions[sym]["entry_price"] = current_pos["entry_price"]
+
+                        # ── TIME STOP: force-close scalp if held > max seconds ──
+                        old_info_ws = known_positions[sym]
+                        trade_type_ws = "swing" if sym in cfg.SWING_SYMBOLS and sym != cfg.SYMBOL else "scalp"
+                        if trade_type_ws == "scalp" and old_info_ws.get("entry_time"):
+                            entry_dt_ws = datetime.fromisoformat(old_info_ws["entry_time"])
+                            hold_secs_ws = (datetime.now(timezone.utc) - entry_dt_ws).total_seconds()
+                            if hold_secs_ws >= cfg.SCALP_MAX_HOLD_SECONDS:
+                                logger.warning(
+                                    "[TIME STOP] {} held {:.0f}s >= {}s limit -- force closing",
+                                    sym, hold_secs_ws, cfg.SCALP_MAX_HOLD_SECONDS,
+                                )
+                                close_order_ws = executor.close_position(sym)
+                                if close_order_ws:
+                                    ts_exit_ws = float(close_order_ws.get("_exit_price", current_pos["entry_price"]))
+                                    ts_entry_ws = old_info_ws["entry_price"]
+                                    ts_side_ws = old_info_ws["side"]
+                                    record_ws = await tracker.record_trade(
+                                        symbol=sym,
+                                        side=ts_side_ws,
+                                        trade_type="scalp",
+                                        entry_price=ts_entry_ws,
+                                        exit_price=ts_exit_ws,
+                                        size=old_info_ws["contracts"],
+                                        reason="time_stop",
+                                        entry_time=old_info_ws.get("entry_time"),
+                                        scoring=last_scoring.get(sym),
+                                    )
+                                    risk.record_trade_pnl(record_ws["pnl_usdt"], record_ws["is_win"])
+                                    risk.invalidate_balance_cache()
+                                    await alerts.send_close_alert(
+                                        side=ts_side_ws,
+                                        symbol=sym,
+                                        entry_price=ts_entry_ws,
+                                        exit_price=ts_exit_ws,
+                                        pnl=record_ws["pnl_usdt"],
+                                        pnl_pct=record_ws["pnl_pct"],
+                                        strategy="scalp",
+                                        exit_reason="TIME_STOP",
+                                    )
+                                    known_positions.pop(sym, None)
+                                    logger.info(
+                                        "[TIME STOP] {} closed | held {:.0f}s | PnL {:+.2f} USDT",
+                                        sym, hold_secs_ws, record_ws["pnl_usdt"],
+                                    )
+
                 except Exception as mon_exc:
                     logger.debug("[MONITOR] Error checking {}: {}", sym, mon_exc)
 
