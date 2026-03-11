@@ -99,6 +99,7 @@ def _create_exchange() -> ccxt.Exchange:
         "apiKey": cfg.BINANCE_API_KEY,
         "secret": cfg.BINANCE_SECRET,
         "enableRateLimit": True,
+        "timeout": 30000,  # 30s – demo exchangeInfo is large
         "options": {
             "adjustForTimeDifference": True,
         },
@@ -126,20 +127,38 @@ def _create_exchange() -> ccxt.Exchange:
         exchange = ccxt.binance({**common_cfg, "options": {**common_cfg["options"], "defaultType": "future"}})
         logger.warning("Exchange: Binance Futures LIVE – real funds at risk")
 
-    # Verify connectivity
-    try:
-        exchange.load_markets()
-    except Exception as exc:
-        logger.error("load_markets() failed: {}: {}", type(exc).__name__, exc)
-        if cfg.BINANCE_DEMO_TRADING:
-            logger.error(
-                "HINT: Demo Trading requires API keys generated from "
-                "Binance Demo Trading page (NOT old testnet keys). "
-                "See: https://www.binance.com/en/support/faq/detail/"
-                "9be58f73e5e14338809e3b705b9687dd\n"
-                "Also ensure ccxt is up-to-date: pip install -U ccxt"
-            )
-        raise
+    # Verify connectivity (retry up to 3× on timeout — demo endpoint can be slow)
+    import time as _time
+    for _attempt in range(1, 4):
+        try:
+            exchange.load_markets()
+            break
+        except (ccxt.RequestTimeout, ccxt.NetworkError) as exc:
+            logger.warning("load_markets() attempt {}/3 timed out: {}", _attempt, exc)
+            if _attempt < 3:
+                _time.sleep(3)
+                continue
+            # Final attempt failed — surface hint and re-raise
+            if cfg.BINANCE_DEMO_TRADING:
+                logger.error(
+                    "HINT: Demo Trading requires API keys generated from "
+                    "Binance Demo Trading page (NOT old testnet keys). "
+                    "See: https://www.binance.com/en/support/faq/detail/"
+                    "9be58f73e5e14338809e3b705b9687dd\n"
+                    "Also ensure ccxt is up-to-date: pip install -U ccxt"
+                )
+            raise
+        except Exception as exc:
+            logger.error("load_markets() failed: {}: {}", type(exc).__name__, exc)
+            if cfg.BINANCE_DEMO_TRADING:
+                logger.error(
+                    "HINT: Demo Trading requires API keys generated from "
+                    "Binance Demo Trading page (NOT old testnet keys). "
+                    "See: https://www.binance.com/en/support/faq/detail/"
+                    "9be58f73e5e14338809e3b705b9687dd\n"
+                    "Also ensure ccxt is up-to-date: pip install -U ccxt"
+                )
+            raise
     logger.info(
         "Markets loaded | {} pairs available", len(exchange.markets)
     )
