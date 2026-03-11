@@ -223,7 +223,6 @@ class FeatureCache:
         # CVD = cumsum(buy_volume - sell_volume)
         if cfg.CVD_ENABLED and len(df) >= cfg.CVD_LOOKBACK + 1:
             try:
-                open_prices = df["open"].astype(float)
                 # Delta per bar: proportion of volume that was "buy"
                 # Using (close - low) / (high - low) as buy fraction
                 # This is more accurate than simple close > open
