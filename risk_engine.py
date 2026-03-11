@@ -255,12 +255,44 @@ class RiskEngine:
     ) -> float:
         """Calculate position size in base currency units.
         
-        If kelly_fraction > 0, uses Kelly-based risk instead of fixed.
+        If kelly_fraction > 0, applies Kelly with warm-up safety:
+        - Below KELLY_MIN_TRADES: ignore Kelly, use fixed risk
+        - Between MIN and RAMP trades: linearly blend fixed -> Kelly
+        - Above RAMP trades: full Kelly (capped at KELLY_MAX_FRACTION)
         """
         equity = self.get_cached_balance()
 
-        # Use Kelly if available, else fixed risk
-        risk_pct = kelly_fraction if kelly_fraction > 0 else self.risk_per_trade
+        # Kelly warm-up: don't trust small sample sizes
+        risk_pct = self.risk_per_trade  # default: fixed fractional
+        if kelly_fraction > 0:
+            # Hard cap: never exceed KELLY_MAX_FRACTION regardless of sample
+            capped_kelly = min(kelly_fraction, cfg.KELLY_MAX_FRACTION)
+
+            # Count completed trades from tracker
+            n_trades = 0
+            if self.trade_tracker is not None:
+                n_trades = len(getattr(self.trade_tracker, '_trades', []))
+
+            if n_trades >= cfg.KELLY_RAMP_TRADES:
+                # Fully warmed up: use capped Kelly
+                risk_pct = capped_kelly
+                logger.debug("Kelly FULL | n={} | kelly={:.3%} -> capped={:.3%}",
+                             n_trades, kelly_fraction, capped_kelly)
+            elif n_trades >= cfg.KELLY_MIN_TRADES:
+                # Ramp zone: linearly blend fixed -> Kelly
+                ramp_progress = (n_trades - cfg.KELLY_MIN_TRADES) / (
+                    cfg.KELLY_RAMP_TRADES - cfg.KELLY_MIN_TRADES
+                )
+                risk_pct = self.risk_per_trade + ramp_progress * (
+                    capped_kelly - self.risk_per_trade
+                )
+                logger.debug("Kelly RAMP | n={} | blend={:.1%} | risk={:.3%}",
+                             n_trades, ramp_progress, risk_pct)
+            else:
+                # Too few trades: ignore Kelly entirely
+                logger.debug("Kelly SKIP | n={} < min={} | using fixed={:.3%}",
+                             n_trades, cfg.KELLY_MIN_TRADES, self.risk_per_trade)
+
         risk_amount = equity * risk_pct
 
         price_distance = abs(entry_price - stop_price)
