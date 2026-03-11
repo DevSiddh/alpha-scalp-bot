@@ -203,6 +203,89 @@ class OrderExecutor:
             )
 
     # -----------------------------------------------------------------
+    # Spread Guard (pre-execution safety check)
+    # -----------------------------------------------------------------
+    def check_spread(self, symbol: str) -> tuple[bool, float, dict]:
+        """Check live bid-ask spread before placing a trade.
+
+        Fetches the top N levels of the order book and calculates the
+        spread as a percentage of the mid price.  If spread exceeds
+        MAX_SPREAD_PCT, the trade should be aborted to avoid slippage.
+
+        Returns
+        -------
+        tuple[bool, float, dict]
+            (is_safe, spread_pct, details)
+            is_safe: True if spread is within tolerance
+            spread_pct: actual spread as fraction (e.g. 0.0003 = 0.03%)
+            details: {best_bid, best_ask, mid_price, spread_pct, book_depth}
+        """
+        if not cfg.SPREAD_GUARD_ENABLED:
+            return True, 0.0, {"skipped": True}
+
+        try:
+            book = self.exchange.fetch_order_book(
+                symbol, limit=cfg.SPREAD_GUARD_BOOK_DEPTH
+            )
+
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+
+            if not bids or not asks:
+                logger.warning(
+                    "SPREAD GUARD | Empty order book for {} – blocking trade",
+                    symbol,
+                )
+                return False, 1.0, {"error": "empty_book"}
+
+            best_bid = float(bids[0][0])
+            best_ask = float(asks[0][0])
+            mid_price = (best_bid + best_ask) / 2.0
+
+            if mid_price <= 0:
+                logger.warning("SPREAD GUARD | Invalid mid price – blocking trade")
+                return False, 1.0, {"error": "invalid_mid"}
+
+            spread_pct = (best_ask - best_bid) / mid_price
+            is_safe = spread_pct <= cfg.MAX_SPREAD_PCT
+
+            details = {
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "mid_price": mid_price,
+                "spread_pct": spread_pct,
+                "max_spread_pct": cfg.MAX_SPREAD_PCT,
+                "bid_depth": sum(float(b[1]) for b in bids[:cfg.SPREAD_GUARD_BOOK_DEPTH]),
+                "ask_depth": sum(float(a[1]) for a in asks[:cfg.SPREAD_GUARD_BOOK_DEPTH]),
+            }
+
+            if is_safe:
+                logger.info(
+                    "SPREAD GUARD PASS | {} | spread={:.4%} (max={:.4%}) | "
+                    "bid={:.2f} ask={:.2f} mid={:.2f}",
+                    symbol, spread_pct, cfg.MAX_SPREAD_PCT,
+                    best_bid, best_ask, mid_price,
+                )
+            else:
+                logger.warning(
+                    "SPREAD GUARD BLOCKED | {} | spread={:.4%} > max={:.4%} | "
+                    "bid={:.2f} ask={:.2f} | Slippage would kill PnL",
+                    symbol, spread_pct, cfg.MAX_SPREAD_PCT,
+                    best_bid, best_ask,
+                )
+
+            return is_safe, spread_pct, details
+
+        except Exception as exc:
+            logger.error(
+                "SPREAD GUARD ERROR | {} | {} – allowing trade (fail-open)",
+                symbol, exc,
+            )
+            # Fail-open: if we can't check spread, don't block the trade
+            # (slippage check after fill is still the backstop)
+            return True, 0.0, {"error": str(exc)}
+
+    # -----------------------------------------------------------------
     # Atomic Bracket Rollback (Fix 2)
     # -----------------------------------------------------------------
     def _place_bracket_orders(
@@ -338,6 +421,15 @@ class OrderExecutor:
                 stop_loss,
                 take_profit,
             )
+
+            # ---- Step 0: Spread guard (pre-execution safety) ----
+            spread_safe, spread_pct, spread_details = self.check_spread(symbol)
+            if not spread_safe:
+                logger.warning(
+                    "TRADE ABORTED by spread guard | {} | spread={:.4%} | {}",
+                    symbol, spread_pct, spread_details,
+                )
+                return None
 
             # ---- Step 1: Market entry ----
             order = self.exchange.create_market_order(
