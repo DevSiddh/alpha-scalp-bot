@@ -1142,8 +1142,11 @@ async def run_bot_ws() -> None:
                 except Exception:
                     pass
                 session_stats = tracker.get_session_stats()
+                cumulative_stats = tracker.get_cumulative_stats()
                 hb_trades = session_stats.get("total_trades", 0)
                 hb_pnl = session_stats.get("total_pnl", 0.0)
+                hb_cum_trades = cumulative_stats.get("total_trades", 0)
+                hb_cum_pnl = cumulative_stats.get("total_pnl", 0.0)
 
                 await alerts.send_heartbeat(
                     uptime_str=uptime_str,
@@ -1153,6 +1156,8 @@ async def run_bot_ws() -> None:
                     book_ok=hb_book_ok,
                     total_trades=hb_trades,
                     session_pnl=hb_pnl,
+                    cumulative_trades=hb_cum_trades,
+                    cumulative_pnl=hb_cum_pnl,
                     spread_bps=hb_spread if hb_spread != float("inf") else 9999.9,
                 )
 
