@@ -553,21 +553,27 @@ class MarketState:
 
         self.flags.set(ChangeFlags.TRADE)
 
-        # Detect price jumps
-        if self._prev_trade_price > 0:
+        # Detect price jumps (skip if book not ready or implausible move)
+        if self._prev_trade_price > 0 and self.book.initialized:
             move_bps = abs(trade.price - self._prev_trade_price) / self._prev_trade_price * 10_000
-            if move_bps >= self._price_jump_threshold_bps:
+            # Cap at 500 bps (5%) — anything larger is a data glitch, not a real move
+            if self._price_jump_threshold_bps <= move_bps < 500:
                 self.flags.set(
                     ChangeFlags.PRICE_JUMP,
                     move_bps=move_bps,
                     direction="up" if trade.price > self._prev_trade_price else "down",
                 )
                 logger.info(
-                    "Price jump detected: %.1f bps %s (%.2f → %.2f)",
+                    "Price jump detected: {:.1f} bps {} ({:.2f} -> {:.2f})",
                     move_bps,
                     "up" if trade.price > self._prev_trade_price else "down",
                     self._prev_trade_price,
                     trade.price,
+                )
+            elif move_bps >= 500:
+                logger.warning(
+                    "Ignoring implausible price jump: {:.0f} bps ({:.2f} -> {:.2f}) — likely stale data",
+                    move_bps, self._prev_trade_price, trade.price,
                 )
 
     def consume_flags(self) -> ChangeFlags:
