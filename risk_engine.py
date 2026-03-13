@@ -10,10 +10,12 @@ Handles:
 - Max open-position enforcement per strategy
 - Per-loop balance caching to reduce API calls
 - Regime-aware SL/TP adjustments
+- ATR-based dynamic SL/TP with R:R check (P1-2)
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -24,6 +26,13 @@ import config as cfg
 
 if TYPE_CHECKING:
     import ccxt
+
+
+@dataclass
+class RiskDecision:
+    """Result of a risk check gate."""
+    allowed: bool
+    reason: str | None = None
 
 
 class RiskEngine:
@@ -110,7 +119,7 @@ class RiskEngine:
         now = time.monotonic()
         if (now - self._cache_timestamp) < self._cache_ttl and self._cached_balance > 0:
             logger.debug("Using cached balance: {:.4f} (age={:.1f}s)",
-                         self._cached_balance, now - self._cache_timestamp)
+                self._cached_balance, now - self._cache_timestamp)
             return self._cached_balance
         return self._fetch_usdt_balance()
 
@@ -150,13 +159,13 @@ class RiskEngine:
             self.daily_start_balance = fallback
             self._cached_balance = fallback
             self._cache_timestamp = time.monotonic()
-        self.daily_pnl = 0.0
-        self.daily_realized_pnl = 0.0
-        self.daily_trades = 0
-        self.daily_wins = 0
-        self.kill_switch_active = False
-        self.daily_circuit_breaker_active = False
-        logger.info("Daily balance synced: {:.2f} USDT", self.daily_start_balance)
+            self.daily_pnl = 0.0
+            self.daily_realized_pnl = 0.0
+            self.daily_trades = 0
+            self.daily_wins = 0
+            self.kill_switch_active = False
+            self.daily_circuit_breaker_active = False
+            logger.info("Daily balance synced: {:.2f} USDT", self.daily_start_balance)
 
     # -----------------------------------------------------------------
     # Kill Switch (3% daily drawdown)
@@ -195,12 +204,12 @@ class RiskEngine:
         self.daily_pnl = current_balance - self.daily_start_balance
 
         logger.debug("Kill-switch check | start={:.2f} | now={:.2f} | dd={:.2%}",
-                     self.daily_start_balance, current_balance, drawdown)
+            self.daily_start_balance, current_balance, drawdown)
 
         if drawdown >= self.daily_dd_limit:
             self.kill_switch_active = True
             logger.critical("KILL SWITCH ACTIVATED | drawdown {:.2%} >= limit {:.2%}",
-                            drawdown, self.daily_dd_limit)
+                drawdown, self.daily_dd_limit)
             return True
 
         return False
@@ -228,7 +237,7 @@ class RiskEngine:
                 )
 
         logger.info("Trade P&L recorded: ${:.2f} ({}) | daily total: ${:.2f} | trades: {}",
-                    pnl, "WIN" if won else "LOSS", self.daily_realized_pnl, self.daily_trades)
+            pnl, "WIN" if won else "LOSS", self.daily_realized_pnl, self.daily_trades)
 
     def check_circuit_breaker(self) -> bool:
         """Return True if daily circuit breaker is active (too many losses today)."""
@@ -273,7 +282,7 @@ class RiskEngine:
         kelly_fraction: float = 0.0,
     ) -> float:
         """Calculate position size in base currency units.
-        
+
         If kelly_fraction > 0, applies Kelly with warm-up safety:
         - Below KELLY_MIN_TRADES: ignore Kelly, use fixed risk
         - Between MIN and RAMP trades: linearly blend fixed -> Kelly
@@ -296,7 +305,7 @@ class RiskEngine:
                 # Fully warmed up: use capped Kelly
                 risk_pct = capped_kelly
                 logger.debug("Kelly FULL | n={} | kelly={:.3%} -> capped={:.3%}",
-                             n_trades, kelly_fraction, capped_kelly)
+                    n_trades, kelly_fraction, capped_kelly)
             elif n_trades >= cfg.KELLY_MIN_TRADES:
                 # Ramp zone: linearly blend fixed -> Kelly
                 ramp_progress = (n_trades - cfg.KELLY_MIN_TRADES) / (
@@ -306,11 +315,11 @@ class RiskEngine:
                     capped_kelly - self.risk_per_trade
                 )
                 logger.debug("Kelly RAMP | n={} | blend={:.1%} | risk={:.3%}",
-                             n_trades, ramp_progress, risk_pct)
+                    n_trades, ramp_progress, risk_pct)
             else:
                 # Too few trades: ignore Kelly entirely
                 logger.debug("Kelly SKIP | n={} < min={} | using fixed={:.3%}",
-                             n_trades, cfg.KELLY_MIN_TRADES, self.risk_per_trade)
+                    n_trades, cfg.KELLY_MIN_TRADES, self.risk_per_trade)
 
         risk_amount = equity * risk_pct
 
@@ -335,12 +344,15 @@ class RiskEngine:
         return size
 
     # -----------------------------------------------------------------
-    # SL / TP (with regime adjustment)
+    # SL / TP (with regime adjustment + ATR-based dynamic P1-2)
     # -----------------------------------------------------------------
     def get_stop_loss(self, entry_price: float, side: str, atr: float = 0.0,
                       regime: str = "RANGING") -> float:
         """SL with ATR or percentage + taker fee buffer.
-        
+
+        P1-2: If atr > 0, uses ATR-based SL with R:R check.
+        Falls back to TOKEN_PROFILES if R:R < MIN_REWARD_RISK_RATIO.
+
         Regime adjustment:
         - TRENDING/VOLATILE: widen SL by 20% (let trends breathe)
         - RANGING: standard SL
@@ -348,6 +360,34 @@ class RiskEngine:
         buffer = 0.0008
         regime_mult = 1.2 if regime in ("TRENDING", "VOLATILE") else 1.0
 
+        # P1-2: ATR-based dynamic SL with R:R check
+        if atr > 0:
+            atr_sl_mult = getattr(cfg, 'ATR_SL_MULTIPLIER', 1.5)
+            atr_tp_mult = getattr(cfg, 'ATR_TP_MULTIPLIER', 3.0)
+            min_rr_ratio = getattr(cfg, 'MIN_REWARD_RISK_RATIO', 1.8)
+
+            sl_distance = atr * atr_sl_mult
+            tp_distance = atr * atr_tp_mult
+
+            sl_pct = sl_distance / entry_price
+            tp_pct = tp_distance / entry_price
+
+            # R:R check - if ratio < minimum, use TOKEN_PROFILES fallback
+            if sl_pct > 0:
+                rr_ratio = tp_pct / sl_pct
+                if rr_ratio >= min_rr_ratio:
+                    # Use ATR-based SL
+                    if side.upper() == "BUY":
+                        sl = entry_price - sl_distance * regime_mult
+                    else:
+                        sl = entry_price + sl_distance * regime_mult
+                    logger.debug(
+                        "ATR SL for {} @ {:.2f} -> {:.2f} (ATR={:.2f}, mult={:.1f}, R:R={:.2f})",
+                        side, entry_price, sl, atr, atr_sl_mult, rr_ratio
+                    )
+                    return float(self.exchange.price_to_precision(self.symbol, sl))
+
+        # Fallback to TOKEN_PROFILES or percentage
         if cfg.SCALP_SL_USE_ATR and atr > 0:
             atr_distance = atr * cfg.SCALP_SL_ATR_MULTIPLIER * regime_mult
             if side.upper() == "BUY":
@@ -355,7 +395,7 @@ class RiskEngine:
             else:
                 sl = entry_price + atr_distance
             logger.debug("ATR SL for {} @ {:.2f} -> {:.2f} (ATR={:.2f}, mult={:.1f}, regime={})",
-                         side, entry_price, sl, atr, cfg.SCALP_SL_ATR_MULTIPLIER, regime)
+                side, entry_price, sl, atr, cfg.SCALP_SL_ATR_MULTIPLIER, regime)
         else:
             effective_sl = self.stop_loss_pct * regime_mult
             if side.upper() == "BUY":
@@ -368,7 +408,10 @@ class RiskEngine:
     def get_take_profit(self, entry_price: float, side: str, atr: float = 0.0,
                         regime: str = "RANGING") -> float:
         """TP with ATR or percentage + taker fee buffer.
-        
+
+        P1-2: If atr > 0, uses ATR-based TP with R:R check.
+        Falls back to TOKEN_PROFILES if R:R < MIN_REWARD_RISK_RATIO.
+
         Regime adjustment:
         - TRENDING/VOLATILE: widen TP by 30% (let profits run)
         - RANGING: standard TP
@@ -376,6 +419,34 @@ class RiskEngine:
         buffer = 0.0008
         regime_mult = 1.3 if regime in ("TRENDING", "VOLATILE") else 1.0
 
+        # P1-2: ATR-based dynamic TP with R:R check
+        if atr > 0:
+            atr_sl_mult = getattr(cfg, 'ATR_SL_MULTIPLIER', 1.5)
+            atr_tp_mult = getattr(cfg, 'ATR_TP_MULTIPLIER', 3.0)
+            min_rr_ratio = getattr(cfg, 'MIN_REWARD_RISK_RATIO', 1.8)
+
+            sl_distance = atr * atr_sl_mult
+            tp_distance = atr * atr_tp_mult
+
+            sl_pct = sl_distance / entry_price
+            tp_pct = tp_distance / entry_price
+
+            # R:R check - if ratio < minimum, use TOKEN_PROFILES fallback
+            if sl_pct > 0:
+                rr_ratio = tp_pct / sl_pct
+                if rr_ratio >= min_rr_ratio:
+                    # Use ATR-based TP
+                    if side.upper() == "BUY":
+                        tp = entry_price + tp_distance * regime_mult
+                    else:
+                        tp = entry_price - tp_distance * regime_mult
+                    logger.debug(
+                        "ATR TP for {} @ {:.2f} -> {:.2f} (ATR={:.2f}, mult={:.1f}, R:R={:.2f})",
+                        side, entry_price, tp, atr, atr_tp_mult, rr_ratio
+                    )
+                    return float(self.exchange.price_to_precision(self.symbol, tp))
+
+        # Fallback to TOKEN_PROFILES or percentage
         if cfg.SCALP_SL_USE_ATR and atr > 0:
             atr_distance = atr * cfg.SCALP_TP_ATR_MULTIPLIER * regime_mult
             if side.upper() == "BUY":
@@ -383,7 +454,7 @@ class RiskEngine:
             else:
                 tp = entry_price - atr_distance
             logger.debug("ATR TP for {} @ {:.2f} -> {:.2f} (ATR={:.2f}, mult={:.1f}, regime={})",
-                         side, entry_price, tp, atr, cfg.SCALP_TP_ATR_MULTIPLIER, regime)
+                side, entry_price, tp, atr, cfg.SCALP_TP_ATR_MULTIPLIER, regime)
         else:
             effective_tp = self.take_profit_pct * regime_mult
             if side.upper() == "BUY":
@@ -407,13 +478,13 @@ class RiskEngine:
         self._trailing_stops[order_id] = initial_trail
         self._trailing_activated[order_id] = False
         logger.info("Trailing stop initialized for {} | entry={:.2f} | "
-                    "initial_trail={:.2f} | ATR={:.2f}",
-                    order_id, entry_price, initial_trail, atr)
+            "initial_trail={:.2f} | ATR={:.2f}",
+            order_id, entry_price, initial_trail, atr)
 
     def update_trailing_stop(self, order_id: str, current_price: float,
                              entry_price: float, side: str, atr: float) -> float | None:
         """Update and return trailing stop price. Returns None if not yet activated.
-        
+
         Activation: price moves +trail_activate_pct from entry.
         Once active: trail = current_price - (ATR * trail_atr_mult) for longs.
         Trail only moves in favorable direction (ratchets up for longs, down for shorts).
@@ -431,7 +502,7 @@ class RiskEngine:
             if pnl_pct >= self.trail_activate_pct:
                 self._trailing_activated[order_id] = True
                 logger.info("TRAILING STOP ACTIVATED for {} | pnl={:.2%} >= {:.2%}",
-                            order_id, pnl_pct, self.trail_activate_pct)
+                    order_id, pnl_pct, self.trail_activate_pct)
             else:
                 return None  # not activated yet
 
@@ -445,7 +516,7 @@ class RiskEngine:
             if new_trail > old_trail:
                 self._trailing_stops[order_id] = new_trail
                 logger.debug("Trail UP for {}: {:.2f} -> {:.2f} (price={:.2f})",
-                             order_id, old_trail, new_trail, current_price)
+                    order_id, old_trail, new_trail, current_price)
             return self._trailing_stops[order_id]
         else:
             new_trail = current_price + atr_trail
@@ -453,7 +524,7 @@ class RiskEngine:
             if new_trail < old_trail:
                 self._trailing_stops[order_id] = new_trail
                 logger.debug("Trail DOWN for {}: {:.2f} -> {:.2f} (price={:.2f})",
-                             order_id, old_trail, new_trail, current_price)
+                    order_id, old_trail, new_trail, current_price)
             return self._trailing_stops[order_id]
 
     def check_trailing_stop_hit(self, order_id: str, current_price: float,
@@ -472,7 +543,7 @@ class RiskEngine:
 
         if hit:
             logger.info("TRAILING STOP HIT for {} | price={:.2f} {} trail={:.2f}",
-                        order_id, current_price, "<=" if side.upper() == "BUY" else ">=", trail)
+                order_id, current_price, "<=" if side.upper() == "BUY" else ">=", trail)
         return hit
 
     def remove_trailing_stop(self, order_id: str) -> None:
@@ -542,7 +613,7 @@ class RiskEngine:
             exposure_pct = total_notional / equity if equity > 0 else 1.0
             under_cap = exposure_pct < cfg.SWING_MAX_TOTAL_EXPOSURE_PCT
             logger.debug("[SWING] Total exposure: {:.2%} / {:.2%} cap",
-                         exposure_pct, cfg.SWING_MAX_TOTAL_EXPOSURE_PCT)
+                exposure_pct, cfg.SWING_MAX_TOTAL_EXPOSURE_PCT)
             return under_cap
         except Exception as exc:
             logger.error("[SWING] Exposure check failed: {}", exc)
@@ -560,7 +631,7 @@ class RiskEngine:
         max_size = max_notional / entry_price
         size = min(size, max_size)
         logger.info("[SWING] Position size | equity={:.2f} | risk$={:.2f} | size={:.6f}",
-                    equity, risk_amount, size)
+            equity, risk_amount, size)
         return size
 
     def check_swing_max_positions(self, symbols: list[str]) -> bool:
@@ -596,7 +667,7 @@ class RiskEngine:
             open_count = sum(1 for p in positions if float(p.get("contracts", 0)) > 0)
             under_limit = open_count < self.max_positions
             logger.debug("Open positions: {} / {} (can_trade={})",
-                         open_count, self.max_positions, under_limit)
+                open_count, self.max_positions, under_limit)
             return under_limit
         except Exception as exc:
             logger.error("Failed to fetch positions: {}", exc)
@@ -607,7 +678,7 @@ class RiskEngine:
     # -----------------------------------------------------------------
     def can_open_trade(self) -> tuple[bool, str]:
         """Run ALL premium risk checks before opening a new trade.
-        
+
         Returns (allowed, reason).
         """
         # 1. Kill switch
@@ -627,6 +698,66 @@ class RiskEngine:
             return False, f"Max concurrent trades ({self.max_concurrent_trades}) reached"
 
         return True, "All checks passed"
+
+    # -----------------------------------------------------------------
+    # ATR-based SL/TP Calculation (P1-2)
+    # -----------------------------------------------------------------
+    def calculate_atr_based_sl_tp(
+        self,
+        entry_price: float,
+        atr: float,
+        is_long: bool = True,
+    ) -> tuple[float, float]:
+        """Calculate stop-loss and take-profit prices using ATR multiples.
+
+        Args:
+            entry_price: The entry price for the trade.
+            atr: Current ATR value.
+            is_long: True for long position, False for short.
+
+        Returns:
+            Tuple of (sl_price, tp_price).
+        """
+        sl_distance = atr * cfg.ATR_SL_MULTIPLIER
+        tp_distance = atr * cfg.ATR_TP_MULTIPLIER
+
+        if is_long:
+            sl_price = entry_price - sl_distance
+            tp_price = entry_price + tp_distance
+        else:
+            sl_price = entry_price + sl_distance
+            tp_price = entry_price - tp_distance
+
+        return sl_price, tp_price
+
+    def check_reward_risk_ratio(
+        self,
+        entry_price: float,
+        atr: float,
+        is_long: bool = True,
+    ) -> RiskDecision:
+        """Check if the R:R ratio meets the minimum threshold.
+
+        Args:
+            entry_price: The entry price for the trade.
+            atr: Current ATR value.
+            is_long: True for long position, False for short.
+
+        Returns:
+            RiskDecision with allowed=False if R:R below threshold.
+        """
+        sl_distance = atr * cfg.ATR_SL_MULTIPLIER
+        tp_distance = atr * cfg.ATR_TP_MULTIPLIER
+
+        reward_risk_ratio = tp_distance / sl_distance
+
+        if reward_risk_ratio < cfg.MIN_REWARD_RISK_RATIO:
+            return RiskDecision(
+                allowed=False,
+                reason=f"R:R below {cfg.MIN_REWARD_RISK_RATIO}",
+            )
+
+        return RiskDecision(allowed=True)
 
     # -----------------------------------------------------------------
     # Daily Reset

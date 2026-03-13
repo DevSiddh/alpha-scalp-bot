@@ -2,33 +2,26 @@
 
 Compute all technical indicators ONCE per candle update, store in a
 dictionary, and let every downstream engine (AlphaEngine, SignalScoring,
-RiskEngine) read from the cache.  Prevents duplicate calculations and
+RiskEngine) read from the cache. Prevents duplicate calculations and
 eliminates indicator drift between modules.
-
-Usage:
-    cache = FeatureCache()
-    features = cache.compute(df)          # df = OHLCV DataFrame
-    ema_trend = features.ema_trend        # +1 fast>slow, -1 fast<slow
-    rsi       = features.rsi
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import pandas as pd
-import pandas_ta as ta
-from loguru import logger
-
+import tinybrain as ta
 import config as cfg
-
+from loguru import logger
 
 @dataclass
 class FeatureSet:
-    """Immutable snapshot of all computed features for the latest bar."""
+    """Container for all computed features from a single candle update.
 
+    All fields are computed once by FeatureCache.compute() and then
+    read by downstream engines (AlphaEngine, SignalScoring, RiskEngine).
+    """
     # --- Price ---
     close: float = 0.0
     prev_close: float = 0.0
@@ -38,7 +31,7 @@ class FeatureSet:
     # --- EMA ---
     ema_fast: float = 0.0
     ema_slow: float = 0.0
-    ema_trend: int = 0           # +1 fast > slow, -1 fast < slow, 0 flat
+    ema_trend: int = 0  # +1 fast>slow, -1 fast<slow, 0 flat
     ema_cross_up: bool = False
     ema_cross_down: bool = False
 
@@ -48,15 +41,19 @@ class FeatureSet:
     # --- ATR ---
     atr: float = 0.0
 
+    # --- ATR-based volatility filter (P1-3) ---
+    atr_ma50: float = 0.0  # 50-period ATR moving average
+    atr_ratio: float = 1.0  # atr / atr_ma50
+
     # --- Nadaraya-Watson Envelope ---
     nw_mid: float = 0.0
     nw_upper: float = 0.0
     nw_lower: float = 0.0
-    nw_long_cross: bool = False   # price crossed below lower band
+    nw_long_cross: bool = False  # price crossed below lower band
     nw_short_cross: bool = False  # price crossed above upper band
 
     # --- Volume ---
-    volume_ratio: float = 1.0    # current_vol / sma_vol
+    volume_ratio: float = 1.0  # current_vol / sma_vol
     volume_spike: bool = False
 
     # --- Bollinger Bands ---
@@ -67,15 +64,15 @@ class FeatureSet:
 
     # --- ADX / Regime ---
     adx: float = 0.0
-    regime: str = "RANGING"       # TRENDING | RANGING | VOLATILE
+    regime: str = "RANGING"  # TRENDING | RANGING | VOLATILE
 
     # --- VWAP ---
     vwap: float = 0.0
 
     # --- CVD (Cumulative Volume Delta) ---
-    cvd_raw: float = 0.0         # raw CVD value (latest bar)
-    cvd_slope: float = 0.0       # normalised slope over lookback (-1 to +1)
-    cvd_divergence: int = 0      # +1 bullish div (price down, CVD up), -1 bearish, 0 none
+    cvd_raw: float = 0.0  # raw CVD value (latest bar)
+    cvd_slope: float = 0.0  # normalised slope over lookback (-1 to +1)
+    cvd_divergence: int = 0  # +1 bullish div (price down, CVD up), -1 bearish, 0 none
 
     def as_dict(self) -> dict[str, Any]:
         """Return all features as a flat dictionary."""
@@ -88,7 +85,7 @@ class FeatureSet:
 class FeatureCache:
     """Compute indicators once, read everywhere.
 
-    Call ``compute(df)`` each loop iteration.  All engines then read
+    Call ``compute(df)`` each loop iteration. All engines then read
     from the returned FeatureSet instead of recalculating.
     """
 
@@ -159,6 +156,22 @@ class FeatureCache:
         # --- ATR ----------------------------------------------------------
         atr = ta.atr(high, low, close, length=cfg.SCALP_SL_ATR_PERIOD)
         fs.atr = float(atr.iloc[-1]) if atr is not None and not pd.isna(atr.iloc[-1]) else 0.0
+
+        # --- ATR-based volatility filter (P1-3) ---
+        # Calculate 50-period ATR moving average
+        atr_period = getattr(cfg, 'ATR_PERIOD', 14)
+        atr_full = ta.atr(high, low, close, length=atr_period)
+        if len(atr_full) >= 50:
+            atr_ma50_series = ta.sma(atr_full, length=50)
+            fs.atr_ma50 = float(atr_ma50_series.iloc[-1]) if atr_ma50_series is not None and not pd.isna(atr_ma50_series.iloc[-1]) else fs.atr
+        else:
+            fs.atr_ma50 = fs.atr  # fallback to current ATR
+
+        # Calculate atr_ratio
+        if fs.atr_ma50 > 0:
+            fs.atr_ratio = fs.atr / fs.atr_ma50
+        else:
+            fs.atr_ratio = 1.0
 
         # --- Nadaraya-Watson Envelope -------------------------------------
         from strategy import ScalpStrategy
@@ -283,9 +296,10 @@ class FeatureCache:
 
         logger.debug(
             "FeatureCache computed | close={:.2f} EMA={}/{} RSI={:.1f} "
-            "ADX={:.1f} regime={} vol={}x BB_sq={}",
+            "ADX={:.1f} regime={} vol={}x BB_sq={} | ATR={:.2f} atr_ma50={:.2f} atr_ratio={:.2f}",
             fs.close, fs.ema_trend, round(fs.ema_fast - fs.ema_slow, 2),
             fs.rsi, fs.adx, fs.regime, fs.volume_ratio, fs.bb_squeeze,
+            fs.atr, fs.atr_ma50, fs.atr_ratio,
         )
         return fs
 

@@ -8,9 +8,9 @@ Scoring Formula:
     weighted_score = sum(vote_i * weight_i)
 
 Decision:
-    score >= +3  → BUY
-    score <= -3  → SELL
-    else         → HOLD
+    score >= +3 → BUY
+    score <= -3 → SELL
+    else → HOLD
 
 Confidence (for Phase 2 position sizing):
     confidence = min(abs(score) / 6, 1.0)
@@ -18,6 +18,9 @@ Confidence (for Phase 2 position sizing):
 
 Weights are loaded from weights.json (per-regime in Phase 2).
 Default weights start at 1.0 for all signals.
+
+P1-3: Volatility filter - returns HOLD if atr_ratio outside valid range.
+P1-4: Regime-based signal disabling - zero-weights signals for current regime.
 """
 
 from __future__ import annotations
@@ -35,19 +38,35 @@ from alpha_engine import AlphaVotes
 from feature_cache import FeatureSet
 
 
+# ===== Phase 1-4: Regime-Based Signal Filtering =============================
+
+def is_signal_enabled(signal_name: str, regime: str) -> bool:
+    """Check if a signal is enabled for the current market regime.
+
+    Args:
+        signal_name: Name of the signal (e.g., "bb_bounce", "ema_cross")
+        regime: Market regime (e.g., "TRENDING_DOWN", "VOLATILE", "TRENDING_UP", "NEUTRAL")
+
+    Returns:
+        False if the signal is disabled for this regime, True otherwise
+    """
+    disabled_signals = cfg.DISABLED_SIGNALS_BY_REGIME.get(regime, [])
+    return signal_name not in disabled_signals
+
+
 # Default signal weights (all equal to start)
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "ema_cross": 1.5,      # Fresh crossover is a strong signal
-    "ema_trend": 0.8,      # Trend alignment — supporting, not primary
-    "rsi": 1.2,            # RSI extremes are reliable
-    "nw_envelope": 1.3,    # NW mean reversion — proven in our bot
-    "volume": 1.0,         # Volume confirmation
-    "bb_squeeze": 0.7,     # Squeeze is anticipatory, not definitive
-    "adx_regime": 0.8,     # Regime context
-    "cvd": 1.1,            # CVD order flow — strong but unproven, slightly above 1.0
-    "bb_bounce": 1.0,      # BB bounce signal (P1-6)
-    "funding_bias": 1.1,   # Funding rate bias (P1-7)
-    "mtf_bias": 1.5,       # 15m MTF confirmation (P1-8)
+    "ema_cross": 1.5,  # Fresh crossover is a strong signal
+    "ema_trend": 0.8,  # Trend alignment — supporting, not primary
+    "rsi": 1.2,  # RSI extremes are reliable
+    "nw_envelope": 1.3,  # NW mean reversion — proven in our bot
+    "volume": 1.0,  # Volume confirmation
+    "bb_squeeze": 0.7,  # Squeeze is anticipatory, not definitive
+    "adx_regime": 0.8,  # Regime context
+    "cvd": 1.1,  # CVD order flow — strong but unproven, slightly above 1.0
+    "bb_bounce": 1.0,  # BB bounce signal (P1-6)
+    "funding_bias": 1.1,  # Funding rate bias (P1-7)
+    "mtf_bias": 1.5,  # 15m MTF confirmation (P1-8)
 }
 
 SCORE_THRESHOLD: float = 3.0  # Minimum |score| to trigger a trade
@@ -58,20 +77,23 @@ class ScoringResult:
     """Output of the scoring engine."""
 
     # Decision
-    action: str = "HOLD"        # BUY | SELL | HOLD
-    score: float = 0.0          # Raw weighted score
-    abs_score: float = 0.0      # Absolute score
-    confidence: float = 0.0     # 0.0 - 1.0 (for position sizing)
+    action: str = "HOLD"  # BUY | SELL | HOLD
+    score: float = 0.0  # Raw weighted score
+    abs_score: float = 0.0  # Absolute score
+    confidence: float = 0.0  # 0.0 - 1.0 (for position sizing)
     threshold: float = SCORE_THRESHOLD
 
     # Breakdown for logging & TradeLogger
-    vote_details: dict[str, int] = None       # raw votes
-    weight_details: dict[str, float] = None   # weights used
+    vote_details: dict[str, int] = None  # raw votes
+    weight_details: dict[str, float] = None  # weights used
     weighted_breakdown: dict[str, float] = None  # vote * weight per signal
-    contributing_signals: list[str] = None    # signals that contributed
+    contributing_signals: list[str] = None  # signals that contributed
 
     # Regime context
     regime: str = "RANGING"
+
+    # Volatility filter (P1-3)
+    volatility_filter_triggered: bool = False
 
     def __post_init__(self):
         if self.vote_details is None:
@@ -92,6 +114,7 @@ class ScoringResult:
             "confidence": round(self.confidence, 3),
             "threshold": self.threshold,
             "regime": self.regime,
+            "volatility_filter_triggered": self.volatility_filter_triggered,
             "vote_details": self.vote_details,
             "weighted_breakdown": {
                 k: round(v, 2) for k, v in self.weighted_breakdown.items()
@@ -173,18 +196,40 @@ class SignalScoring:
     def score(self, votes: AlphaVotes, features: FeatureSet) -> ScoringResult:
         """Compute weighted score from alpha votes.
 
+        P1-3: Applies volatility filter - returns HOLD if atr_ratio is outside valid range.
+        P1-4: Zero-weights disabled signals for current regime.
+
         Parameters
         ----------
         votes : AlphaVotes
             Raw votes from AlphaEngine.
         features : FeatureSet
-            Cached features (used for regime context).
+            Cached features (used for regime context and volatility filter).
 
         Returns
         -------
         ScoringResult
             Full scoring output with breakdown.
         """
+        # P1-3: Volatility filter check
+        volatility_filter_triggered = False
+        atr_ratio_max = getattr(cfg, 'ATR_RATIO_MAX', 2.5)
+        atr_ratio_min = getattr(cfg, 'ATR_RATIO_MIN', 0.5)
+        atr_ratio = getattr(features, 'atr_ratio', 1.0)
+
+        if atr_ratio > atr_ratio_max:
+            volatility_filter_triggered = True
+            logger.info(
+                "VOLATILITY FILTER | atr_ratio={:.2f} > MAX={:.2f} | HOLD",
+                atr_ratio, atr_ratio_max
+            )
+        elif atr_ratio < atr_ratio_min:
+            volatility_filter_triggered = True
+            logger.info(
+                "VOLATILITY FILTER | atr_ratio={:.2f} < MIN={:.2f} | HOLD",
+                atr_ratio, atr_ratio_min
+            )
+
         regime = features.regime
         weights = self.get_weights_for_regime(regime)
         vote_dict = votes.as_dict()
@@ -193,21 +238,24 @@ class SignalScoring:
         weighted_breakdown: dict[str, float] = {}
         total_score = 0.0
 
-        # P1-6: Zero-weight disabled signals for current regime
+        # P1-4: Zero-weight disabled signals for current regime
         disabled = getattr(cfg, 'DISABLED_SIGNALS_BY_REGIME', {}).get(regime, [])
 
         for signal_name, vote_value in vote_dict.items():
             w = weights.get(signal_name, 1.0)
             if signal_name in disabled:
                 w = 0.0
+                logger.debug("Signal {} disabled for regime {} (weight=0)", signal_name, regime)
             weighted_val = vote_value * w
             weighted_breakdown[signal_name] = weighted_val
             total_score += weighted_val
 
         abs_score = abs(total_score)
 
-        # Decision
-        if total_score >= SCORE_THRESHOLD:
+        # Decision (apply volatility filter)
+        if volatility_filter_triggered:
+            action = "HOLD"
+        elif total_score >= SCORE_THRESHOLD:
             action = "BUY"
         elif total_score <= -SCORE_THRESHOLD:
             action = "SELL"
@@ -236,9 +284,15 @@ class SignalScoring:
             weighted_breakdown=weighted_breakdown,
             contributing_signals=contributing,
             regime=regime,
+            volatility_filter_triggered=volatility_filter_triggered,
         )
 
-        if action != "HOLD":
+        if volatility_filter_triggered:
+            logger.info(
+                "SCORE HOLD (volatility filter) | atr_ratio={:.2f} | regime={}",
+                atr_ratio, regime,
+            )
+        elif action != "HOLD":
             logger.info(
                 "SCORE {} | score={:+.2f} (threshold={}) | conf={:.1%} | "
                 "regime={} | signals: {}",
