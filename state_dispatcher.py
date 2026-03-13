@@ -245,12 +245,19 @@ class StateChangeDispatcher:
                         metadata=flags.get_meta(ChangeFlags.PRICE_JUMP),
                     ))
 
-                # HIGH: Candle complete → full pipeline
+                # HIGH: Candle complete → candle confirmation anti-fakeout (P2-12)
                 if flags.is_set(ChangeFlags.CANDLE_COMPLETE):
-                    await self._enqueue(DispatchEvent(
-                        priority=EventPriority.HIGH,
-                        event_type="candle_complete",
-                    ))
+                    confirmed = await self._confirm_candle_direction()
+                    if confirmed:
+                        await self._enqueue(DispatchEvent(
+                            priority=EventPriority.HIGH,
+                            event_type="candle_complete",
+                        ))
+                    else:
+                        self._events_dropped += 1
+                        logger.debug(
+                            "Candle confirmation: direction not confirmed — signal discarded"
+                        )
 
                 # NORMAL: Book update → coalesce rapid-fire updates
                 if flags.is_set(ChangeFlags.BOOK_UPDATE):
@@ -293,6 +300,58 @@ class StateChangeDispatcher:
             except Exception as e:
                 logger.error("Flag poller error: %s", e, exc_info=True)
 
+    async def _confirm_candle_direction(self) -> bool:
+        """Candle confirmation anti-fakeout (P2-12).
+
+        After a candle-close signal fires, confirm the next candle open
+        continues in the same direction before triggering the pipeline.
+
+        BUY  signal: next candle open > previous candle close  → confirmed
+        SELL signal: next candle open < previous candle close  → confirmed
+        No last signal or neutral: always confirmed (let pipeline decide).
+
+        Returns True if the pipeline should run, False to discard the signal.
+        """
+        try:
+            kline = self.state.kline  # current (just-opened) candle
+            prev_close = getattr(self.state, "prev_candle_close", None)
+
+            if prev_close is None or prev_close == 0:
+                # No previous close available — cannot confirm, allow through
+                return True
+
+            curr_open = getattr(kline, "open", None)
+            if curr_open is None:
+                return True
+
+            # Determine last signal direction from market state if available
+            last_signal = getattr(self.state, "last_signal_direction", None)
+
+            if last_signal == "BUY":
+                confirmed = float(curr_open) > float(prev_close)
+                if not confirmed:
+                    logger.info(
+                        "Anti-fakeout: BUY discarded — open {:.4f} <= prev_close {:.4f}",
+                        curr_open, prev_close,
+                    )
+                return confirmed
+
+            elif last_signal == "SELL":
+                confirmed = float(curr_open) < float(prev_close)
+                if not confirmed:
+                    logger.info(
+                        "Anti-fakeout: SELL discarded — open {:.4f} >= prev_close {:.4f}",
+                        curr_open, prev_close,
+                    )
+                return confirmed
+
+            # No directional signal stored yet — allow through
+            return True
+
+        except Exception as exc:
+            logger.debug("Candle confirmation check error: {} — allowing through", exc)
+            return True
+
     async def _enqueue(self, event: DispatchEvent) -> None:
         """Enqueue event with backpressure handling.
 
@@ -308,12 +367,11 @@ class StateChangeDispatcher:
                 )
                 return
 
-            # High-priority event but queue full — drain one low-priority item
-            try:
-                self._queue.get_nowait()
-                self._events_dropped += 1
-            except asyncio.QueueEmpty:
-                pass
+            # Queue full — only force-in if incoming is more critical than queued items
+            # Safe fallback: drop the incoming event rather than risk evicting CRITICAL items
+            self._events_dropped += 1
+            logger.debug("Dropped %s event (queue full)", event.event_type)
+            return
 
         try:
             self._queue.put_nowait(event)

@@ -54,6 +54,8 @@ class Trade:
 
 # ── Backtest engine ─────────────────────────────────────────────────
 class Backtester:
+    SLIPPAGE_PCT: float = 0.0003
+
     def __init__(self, df: pd.DataFrame, fee_pct: float = 0.0):
         self.df = df
         self.fee_pct = fee_pct  # one-way fee (applied on entry + exit)
@@ -137,11 +139,14 @@ class Backtester:
             exit_price = pos.tp
         elif reason == "trail":
             if pos.side == "BUY":
-                exit_price = pos.entry * (1 + self.trail_delta_pct)
+                exit_price = pos.entry * (1 + self.trail_delta_pct) * (1 - self.SLIPPAGE_PCT)
             else:
-                exit_price = pos.entry * (1 - self.trail_delta_pct)
+                exit_price = pos.entry * (1 - self.trail_delta_pct) * (1 + self.SLIPPAGE_PCT)
         else:  # time_stop
-            exit_price = row["close"]
+            if pos.side == "BUY":
+                exit_price = row["close"] * (1 - self.SLIPPAGE_PCT)
+            else:
+                exit_price = row["close"] * (1 + self.SLIPPAGE_PCT)
 
         # PnL
         if pos.side == "BUY":
@@ -192,7 +197,11 @@ class Backtester:
                     continue
 
                 if result.action != "HOLD":
-                    entry = row["close"]
+                    raw_entry = row["close"]
+                    if result.action == "BUY":
+                        entry = raw_entry * (1 + self.SLIPPAGE_PCT)
+                    else:
+                        entry = raw_entry * (1 - self.SLIPPAGE_PCT)
                     sl, tp = self._calc_sl_tp(entry, result.action)
                     self.position = Trade(
                         bar_in=i,

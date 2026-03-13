@@ -301,6 +301,9 @@ async def run_bot_polling() -> None:  # noqa: C901
     tracker = TradeTrackerV2()
     risk.set_trade_tracker(tracker)
 
+    # P0-1: Reconcile open position on restart
+    await executor.reconcile_position(tracker)
+
     # ── Phase 1: Alpha Engine pipeline ──
     feature_cache = FeatureCache()
     alpha_engine = AlphaEngine()
@@ -315,7 +318,7 @@ async def run_bot_polling() -> None:  # noqa: C901
 
     # Set margin type and leverage once at startup
     executor.set_margin_type(cfg.SYMBOL)
-    executor.set_leverage(cfg.SYMBOL, cfg.LEVERAGE)
+    executor.set_leverage(cfg.SYMBOL, cfg.TOKEN_LEVERAGE)
 
     # --- Swing trading init ---
     swing_strategy = SwingStrategy() if cfg.SWING_ENABLED else None
@@ -461,7 +464,7 @@ async def run_bot_polling() -> None:  # noqa: C901
                             stop_loss=sl,
                             take_profit=tp,
                             size=size,
-                            leverage=cfg.LEVERAGE,
+                            leverage=cfg.TOKEN_LEVERAGE,
                             strategy="scalp",
                             regime=result.regime,
                             confidence=result.confidence,
@@ -681,7 +684,7 @@ async def run_bot_polling() -> None:  # noqa: C901
                 if len(tracker._trades) >= 30:
                     try:
                         logger.info("Starting weight optimization cycle...")
-                        success = await optimizer.run_optimization_cycle()
+                        success = await asyncio.create_task(optimizer.run_optimization_cycle())
                         if success:
                             signal_scoring._load_weights()  # reload updated weights
                             logger.info("Weight optimization completed successfully")
@@ -770,6 +773,9 @@ async def run_bot_ws() -> None:
     tracker = TradeTrackerV2()
     risk.set_trade_tracker(tracker)
 
+    # P0-1: Reconcile open position on restart
+    await executor.reconcile_position(tracker)
+
     feature_cache = FeatureCache()
     alpha_engine = AlphaEngine()
     signal_scoring = SignalScoring()
@@ -778,7 +784,7 @@ async def run_bot_ws() -> None:
     last_scoring: dict = {}
 
     executor.set_margin_type(cfg.SYMBOL)
-    executor.set_leverage(cfg.SYMBOL, cfg.LEVERAGE)
+    executor.set_leverage(cfg.SYMBOL, cfg.TOKEN_LEVERAGE)
 
     # Swing init
     swing_strategy = SwingStrategy() if cfg.SWING_ENABLED else None
@@ -914,7 +920,7 @@ async def run_bot_ws() -> None:
                         side="BUY" if side == "long" else "SELL",
                         symbol=sym, entry_price=entry,
                         stop_loss=sl, take_profit=tp, size=size,
-                        leverage=cfg.LEVERAGE, strategy="scalp",
+                        leverage=cfg.TOKEN_LEVERAGE, strategy="scalp",
                         regime=result.regime, confidence=result.confidence,
                         atr_value=atr_val,
                     )
@@ -1067,7 +1073,7 @@ async def run_bot_ws() -> None:
             if len(tracker._trades) >= 30:
                 try:
                     logger.info("Starting weight optimization cycle...")
-                    success = await optimizer.run_optimization_cycle()
+                    success = await asyncio.create_task(optimizer.run_optimization_cycle())
                     if success:
                         signal_scoring._load_weights()
                         logger.info("Weight optimization completed successfully")
@@ -1125,7 +1131,7 @@ async def run_bot_ws() -> None:
                         side="BUY" if side == "long" else "SELL",
                         symbol=cfg.SYMBOL, entry_price=entry,
                         stop_loss=sl, take_profit=tp, size=size,
-                        leverage=cfg.LEVERAGE, strategy="scalp",
+                        leverage=cfg.TOKEN_LEVERAGE, strategy="scalp",
                         regime=result.regime, confidence=result.confidence,
                         atr_value=atr_val,
                     )

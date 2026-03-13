@@ -17,6 +17,8 @@ Signal Votes:
 
 from __future__ import annotations
 
+import time
+
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +40,9 @@ class AlphaVotes:
     bb_squeeze: int = 0      # Bollinger Band squeeze breakout
     adx_regime: int = 0      # ADX trend strength
     cvd: int = 0              # Cumulative Volume Delta pressure
+    funding_bias: int = 0    # Funding rate bias (P1-7)
+    mtf_bias: int = 0        # 15m MTF confirmation (P1-8)
+    ob_imbalance: int = 0    # Order book imbalance (P2-13)
 
     def as_dict(self) -> dict[str, int]:
         """Return all votes as a dictionary."""
@@ -64,6 +69,8 @@ class AlphaEngine:
     by simply writing a new ``_vote_xxx`` method and including it
     in ``generate_votes()``.
     """
+
+    _funding_cache: dict = {}  # {"rate": float, "ts": float}  — P1-7
 
     def __init__(self) -> None:
         logger.info("AlphaEngine initialised (8 signal voters)")
@@ -228,11 +235,80 @@ class AlphaEngine:
         # Clamp to [-2, +2]
         return max(-2, min(+2, vote))
 
+    def _get_funding_rate(self) -> float:
+        """Fetch and cache Binance futures funding rate (8h cache)."""
+        now = time.time()
+        cache_ttl = getattr(cfg, 'FUNDING_RATE_CACHE_SECONDS', 28800)
+        if self._funding_cache and (now - self._funding_cache.get("ts", 0)) < cache_ttl:
+            return self._funding_cache["rate"]
+        try:
+            symbol_raw = cfg.SYMBOL.replace("/", "")
+            url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol_raw}&limit=1"
+            import urllib.request, json as _json
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                data = _json.loads(resp.read())
+            rate = float(data[0]["fundingRate"]) if data else 0.0
+            self._funding_cache = {"rate": rate, "ts": now}
+            logger.debug("funding_rate fetched: {:.6f}", rate)
+            return rate
+        except Exception as exc:
+            logger.warning("funding_rate fetch failed: {} — using 0.0", exc)
+            return self._funding_cache.get("rate", 0.0)
+
+    def _vote_funding_bias(self, fs: "FeatureSet") -> int:
+        """Funding rate bias vote (P1-7). Returns -1, 0, or +1 mapped to strength."""
+        threshold = getattr(cfg, 'FUNDING_RATE_THRESHOLD', 0.0005)
+        rate = self._get_funding_rate()
+        if rate < -threshold:
+            return 1   # negative funding -> longs pay less -> BUY bias
+        if rate > threshold:
+            return -1  # positive funding -> shorts pay less -> SELL bias
+        return 0
+
+    @staticmethod
+    def _vote_ob_imbalance(fs: "FeatureSet") -> int:
+        """Order book imbalance vote (P2-13).
+
+        Uses top-10 bid/ask quantities already collected by MarketState.
+
+        bid_ratio = bid_vol / (bid_vol + ask_vol)
+        bid_ratio > 0.65  → BUY  (+1)
+        bid_ratio < 0.35  → SELL (-1)
+        else              → HOLD  (0)
+
+        Weight: ob_imbalance = 0.9 (see weights.json)
+        Wrapped entirely in try/except — depth data may be empty on WS reconnect.
+        """
+        try:
+            bids = getattr(fs, "ob_bids", None)  # list of [price, qty] top-10
+            asks = getattr(fs, "ob_asks", None)
+
+            if not bids or not asks:
+                return 0
+
+            bid_vol = sum(float(b[1]) for b in bids[:10])
+            ask_vol = sum(float(a[1]) for a in asks[:10])
+            total = bid_vol + ask_vol
+
+            if total <= 0:
+                return 0
+
+            bid_ratio = bid_vol / total
+
+            if bid_ratio > 0.65:
+                return +1   # strong buy-side pressure
+            if bid_ratio < 0.35:
+                return -1   # strong sell-side pressure
+            return 0
+
+        except Exception:
+            return 0
+
     # ------------------------------------------------------------------
     # Main vote generator
     # ------------------------------------------------------------------
 
-    def generate_votes(self, fs: FeatureSet) -> AlphaVotes:
+    def generate_votes(self, fs: FeatureSet, swing_strategy=None, exchange=None) -> AlphaVotes:
         """Run all signal voters against the current FeatureSet.
 
         Parameters
@@ -254,7 +330,13 @@ class AlphaEngine:
             bb_squeeze=self._vote_bb_squeeze(fs),
             adx_regime=self._vote_adx_regime(fs),
             cvd=self._vote_cvd(fs),
+            funding_bias=self._vote_funding_bias(fs),
+            ob_imbalance=self._vote_ob_imbalance(fs),
         )
+
+        # P1-8: MTF bias from swing strategy
+        if swing_strategy is not None and exchange is not None:
+            votes.mtf_bias = swing_strategy.get_mtf_bias(exchange)
 
         logger.debug(
             "AlphaEngine votes | total={:+d} | {}",

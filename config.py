@@ -48,7 +48,7 @@ TELEGRAM_CHAT_ID: str = _env("TELEGRAM_CHAT_ID", "")
 
 # ===== Trading Pair & Timeframe =============================================
 SYMBOL: str = _env("SYMBOL", "BTC/USDT")
-TIMEFRAME: str = _env("TIMEFRAME", "1m")
+TIMEFRAME: str = _env("TIMEFRAME", "3m")
 LOOKBACK_CANDLES: int = _env("LOOKBACK_CANDLES", "200", cast=int)
 
 # ===== Swing Trading ========================================================
@@ -130,10 +130,10 @@ SCALP_TRAIL_DELTA_PCT: float = _env("SCALP_TRAIL_DELTA_PCT", "0.002", cast=float
 # ===== PREMIUM: Scalp Time Stop (max hold duration) =========================
 # Force-close scalp positions after N seconds if TP/SL not hit.
 # Edge from microstructure signals decays fast -- 180s = 3 candles on 1m.
-SCALP_MAX_HOLD_SECONDS: int = _env("SCALP_MAX_HOLD_SECONDS", "180", cast=int)
+SCALP_MAX_HOLD_SECONDS: int = _env("SCALP_MAX_HOLD_SECONDS", "900", cast=int)
 
 # ===== PREMIUM: Concurrent Trade Limiter ====================================
-MAX_CONCURRENT_TRADES: int = _env("MAX_CONCURRENT_TRADES", "3", cast=int)
+MAX_CONCURRENT_TRADES: int = _env("MAX_CONCURRENT_TRADES", "1", cast=int)
 
 # ===== PREMIUM: Daily P&L Circuit Breaker ===================================
 DAILY_LOSS_LIMIT: float = _env("DAILY_LOSS_LIMIT", "0.03", cast=float)
@@ -277,3 +277,24 @@ if SWING_ENABLED:
     logger.info(f"Swing Trail  : activate={SWING_TRAIL_ACTIVATE_PCT:.1%}, offset={SWING_TRAIL_OFFSET_PCT:.1%}, EMA20={'ON' if SWING_TRAIL_USE_EMA20 else 'OFF'}")
     logger.info(f"Swing Exposure: max {SWING_MAX_TOTAL_EXPOSURE_PCT:.1%} total")
 logger.info("=" * 60)
+
+# ===== Per-Token Risk Profiles =================================================
+TOKEN_PROFILES: dict[str, dict] = {
+    "BTC/USDT": {"sl_pct": 0.007, "tp_pct": 0.015, "leverage": 4},
+    "ETH/USDT": {"sl_pct": 0.009, "tp_pct": 0.018, "leverage": 3},
+    "SOL/USDT": {"sl_pct": 0.012, "tp_pct": 0.025, "leverage": 2},
+}
+_TOKEN_PROFILE = TOKEN_PROFILES.get(SYMBOL, {"sl_pct": STOP_LOSS_PCT, "tp_pct": TAKE_PROFIT_PCT, "leverage": LEVERAGE})
+TOKEN_SL_PCT: float = _TOKEN_PROFILE["sl_pct"]
+TOKEN_TP_PCT: float = _TOKEN_PROFILE["tp_pct"]
+TOKEN_LEVERAGE: int = _TOKEN_PROFILE["leverage"]
+
+# ===== Regime-Based Signal Disabling ==========================================
+DISABLED_SIGNALS_BY_REGIME: dict[str, list[str]] = {
+    "TRENDING_DOWN": ["bb_bounce"],
+    "VOLATILE": ["ema_cross"],
+}
+
+# ===== Funding Rate Signal ====================================================
+FUNDING_RATE_CACHE_SECONDS: int = _env("FUNDING_RATE_CACHE_SECONDS", "28800", cast=int)  # 8 hours
+FUNDING_RATE_THRESHOLD: float = _env("FUNDING_RATE_THRESHOLD", "0.0005", cast=float)

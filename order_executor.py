@@ -13,6 +13,8 @@ Wraps CCXT calls to Binance Futures for:
 
 from __future__ import annotations
 
+import asyncio
+
 from typing import TYPE_CHECKING, Any
 
 import ccxt
@@ -54,6 +56,61 @@ class OrderExecutor:
             self.order_type,
             self.slippage_tolerance,
         )
+
+
+    # -------------------------------------------------------------------------
+    # P0-1: Position Reconcile on Restart
+    # -------------------------------------------------------------------------
+    async def reconcile_position(self, trade_tracker) -> bool:
+        """On startup: check for open positions/orders and restore into TradeTrackerV2.
+
+        Returns True if an open position was found and restored.
+        """
+        try:
+            positions = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self.exchange.fetch_positions([self.symbol])
+            )
+            open_orders = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self.exchange.fetch_open_orders(self.symbol)
+            )
+
+            active = [p for p in positions if abs(float(p.get("contracts", 0) or 0)) > 0]
+            if not active:
+                logger.info("reconcile_position | no open position found for {}", self.symbol)
+                return False
+
+            pos = active[0]
+            side = "BUY" if float(pos.get("contracts", 0)) > 0 else "SELL"
+            entry_price = float(pos.get("entryPrice") or pos.get("info", {}).get("entryPrice", 0))
+            contracts = abs(float(pos.get("contracts", 0)))
+
+            logger.warning(
+                "reconcile_position | OPEN POSITION FOUND | side={} entry={:.4f} contracts={:.6f} — restoring into TradeTracker",
+                side, entry_price, contracts,
+            )
+
+            # Find SL/TP from open bracket orders if available
+            sl_price, tp_price = 0.0, 0.0
+            for o in open_orders:
+                otype = (o.get("type") or "").lower()
+                if "stop" in otype:
+                    sl_price = float(o.get("stopPrice") or o.get("price") or 0)
+                elif otype in ("take_profit", "take_profit_market", "limit"):
+                    tp_price = float(o.get("stopPrice") or o.get("price") or 0)
+
+            trade_tracker.restore_open_position(
+                symbol=self.symbol,
+                side=side,
+                entry_price=entry_price,
+                contracts=contracts,
+                sl_price=sl_price,
+                tp_price=tp_price,
+            )
+            return True
+
+        except Exception as exc:
+            logger.error("reconcile_position | failed: {}", exc)
+            return False
 
     # -----------------------------------------------------------------
     # Error Classification (Fix 3)
@@ -131,7 +188,7 @@ class OrderExecutor:
     def set_leverage(self, symbol: str | None = None, leverage: int | None = None) -> bool:
         """Set leverage for *symbol* on Binance Futures."""
         symbol = symbol or self.symbol
-        leverage = leverage or self.risk.leverage
+        leverage = leverage or self.risk.get_effective_leverage()
         try:
             self.exchange.set_leverage(leverage, symbol)
             logger.info("Leverage set to {}x for {}", leverage, symbol)
@@ -614,7 +671,7 @@ class OrderExecutor:
                     "contracts": float(p.get("contracts", 0)),
                     "entry_price": float(p.get("entryPrice", 0)),
                     "unrealized_pnl": float(p.get("unrealizedPnl", 0)),
-                    "leverage": p.get("leverage", self.risk.leverage),
+                    "leverage": p.get("leverage", self.risk.get_effective_leverage()),
                     "liquidation_price": p.get("liquidationPrice"),
                 }
                 for p in positions

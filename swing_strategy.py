@@ -57,6 +57,12 @@ class SwingStrategy:
         self.rsi_short_low: int = cfg.SWING_RSI_SHORT_LOW
         self.rsi_short_high: int = cfg.SWING_RSI_SHORT_HIGH
 
+        # P1-8: 15m MTF cache
+        self._mtf_cache: dict = {}  # {"vote": int, "ts": float, "bar_ts": float}
+        self.mtf_ema_fast: int = 9
+        self.mtf_ema_slow: int = 21
+        self.mtf_rsi_period: int = 14
+
         logger.info(
             "SwingStrategy initialised | EMA {}/{} | RSI {} (long {}-{}, short {}-{}) | TF={}",
             self.ema_fast_period,
@@ -273,3 +279,52 @@ class SwingStrategy:
             )
 
         return trade_signal
+
+    def get_mtf_bias(self, exchange) -> int:
+        """Fetch 15m klines and return MTF bias vote: +1 BUY, -1 SELL, 0 HOLD.
+
+        Caches result for 15 minutes (900s). Uses same REST method as 4h klines.
+        """
+        import time
+        now = time.time()
+        cache_ttl = 900  # 15 minutes
+
+        # Refresh on new 15m candle or cache expiry
+        if self._mtf_cache and (now - self._mtf_cache.get("ts", 0)) < cache_ttl:
+            return self._mtf_cache.get("vote", 0)
+
+        try:
+            symbol = cfg.SYMBOL
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe="15m", limit=50)
+            if not ohlcv or len(ohlcv) < self.mtf_ema_slow + 2:
+                return 0
+
+            df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+            df["ema_fast"] = ta.ema(df["close"], length=self.mtf_ema_fast)
+            df["ema_slow"] = ta.ema(df["close"], length=self.mtf_ema_slow)
+            df["rsi"] = ta.rsi(df["close"], length=self.mtf_rsi_period)
+
+            last = df.iloc[-1]
+            ema_fast = last["ema_fast"]
+            ema_slow = last["ema_slow"]
+            rsi = last["rsi"]
+
+            if pd.isna(ema_fast) or pd.isna(ema_slow) or pd.isna(rsi):
+                return 0
+
+            if ema_fast > ema_slow and rsi > 45:
+                vote = 1   # BUY strength 0.7 mapped to +1
+            elif ema_fast < ema_slow and rsi < 55:
+                vote = -1  # SELL strength 0.7 mapped to -1
+            else:
+                vote = 0
+
+            self._mtf_cache = {"vote": vote, "ts": now}
+            logger.debug("mtf_bias(15m) | ema_fast={:.2f} ema_slow={:.2f} rsi={:.1f} vote={}",
+                        ema_fast, ema_slow, rsi, vote)
+            return vote
+
+        except Exception as exc:
+            logger.warning("mtf_bias fetch failed: {} — using 0", exc)
+            return self._mtf_cache.get("vote", 0)
+

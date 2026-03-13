@@ -72,7 +72,7 @@ class WeightOptimizer:
         
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, headers=headers, json=payload, timeout=30) as response:
+                async with session.post(self.api_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as response:
                     if response.status != 200:
                         logger.error(f"LLM API Error: {response.status} - {await response.text()}")
                         return None
@@ -109,10 +109,73 @@ class WeightOptimizer:
             
         return sanitized
 
+    def _check_profit_factor_gate(self) -> bool:
+        """Return True if profit factor >= 1.2 (safe to apply new weights).
+
+        Profit factor = total_wins_pnl / abs(total_losses_pnl).
+        If < 1.2, freeze weights and send Telegram alert.
+        """
+        try:
+            stats = self.tracker.get_cumulative_stats()
+            total_wins_pnl = float(stats.get("total_profit", 0.0))
+            total_losses_pnl = float(stats.get("total_loss", 0.0))
+
+            total_trades = int(stats.get("total_trades", 0))
+            if total_trades < 10:
+                logger.debug("Profit factor gate: insufficient trades ({}) — skipping gate", total_trades)
+                return True
+
+            abs_losses = abs(total_losses_pnl)
+            if abs_losses == 0:
+                return True
+
+            profit_factor = total_wins_pnl / abs_losses
+            logger.info(
+                "Profit factor gate: {:.3f} (wins={:.2f}, losses={:.2f})",
+                profit_factor, total_wins_pnl, total_losses_pnl,
+            )
+
+            if profit_factor < 1.2:
+                logger.warning("Profit factor {:.3f} < 1.2 — weights FROZEN", profit_factor)
+                try:
+                    import aiohttp as _aiohttp
+                    telegram_bot_token = getattr(cfg, "TELEGRAM_BOT_TOKEN", "")
+                    telegram_chat_id = getattr(cfg, "TELEGRAM_CHAT_ID", "")
+                    if telegram_bot_token and telegram_chat_id:
+                        msg = f"\u26a0\ufe0f Profit factor below 1.2 ({profit_factor:.3f}), weights frozen"
+                        url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
+
+                        async def _send_alert() -> None:
+                            async with _aiohttp.ClientSession() as s:
+                                await s.post(
+                                    url,
+                                    json={"chat_id": telegram_chat_id, "text": msg},
+                                    timeout=_aiohttp.ClientTimeout(total=10),
+                                )
+
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(_send_alert())
+                        except RuntimeError:
+                            pass  # no running loop — skip fire-and-forget alert
+                except Exception as tg_exc:
+                    logger.debug("Telegram alert for profit factor gate failed: {}", tg_exc)
+                return False
+
+            return True
+
+        except Exception as exc:
+            logger.error("Profit factor gate check failed: {} — allowing optimization", exc)
+            return True
+
     async def run_optimization_cycle(self) -> bool:
         """Main execution flow to update the weights file."""
+        # P1-10: Profit factor gate — freeze weights if bot is in a losing streak
+        if not self._check_profit_factor_gate():
+            return False
+
         new_weights_raw = await self.fetch_optimized_weights()
-        
+
         if not new_weights_raw:
             return False
             

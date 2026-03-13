@@ -38,10 +38,10 @@ class RiskEngine:
         # Config shortcuts
         self.risk_per_trade: float = cfg.RISK_PER_TRADE
         self.daily_dd_limit: float = cfg.DAILY_DRAWDOWN_LIMIT
-        self.stop_loss_pct: float = cfg.STOP_LOSS_PCT
-        self.take_profit_pct: float = cfg.TAKE_PROFIT_PCT
+        self.stop_loss_pct: float = cfg.TOKEN_SL_PCT
+        self.take_profit_pct: float = cfg.TOKEN_TP_PCT
         self.max_positions: int = cfg.MAX_OPEN_POSITIONS
-        self.leverage: int = cfg.LEVERAGE
+        self.leverage: int = cfg.TOKEN_LEVERAGE
         self.symbol: str = cfg.SYMBOL
 
         # Daily tracking
@@ -117,6 +117,25 @@ class RiskEngine:
     def invalidate_balance_cache(self) -> None:
         self._cache_timestamp = 0.0
         logger.debug("Balance cache invalidated")
+
+    def get_effective_leverage(self) -> int:
+        """Return leverage scaled down based on daily drawdown (P1-9)."""
+        base = self.leverage
+        dd = self._current_drawdown_pct()
+        if dd >= 0.05:
+            return max(1, int(base * 0.25))
+        if dd >= 0.035:
+            return max(1, int(base * 0.25))
+        if dd >= 0.02:
+            return max(1, int(base * 0.5))
+        return base
+
+    def _current_drawdown_pct(self) -> float:
+        """Current daily drawdown as a positive fraction."""
+        if self.daily_start_balance <= 0:
+            return 0.0
+        loss = self.daily_start_balance - (self.daily_start_balance + self.daily_realized_pnl)
+        return max(0.0, loss / self.daily_start_balance)
 
     def _sync_daily_balance(self) -> None:
         try:

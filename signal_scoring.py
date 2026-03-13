@@ -29,6 +29,8 @@ from typing import Any
 
 from loguru import logger
 
+import config as cfg
+
 from alpha_engine import AlphaVotes
 from feature_cache import FeatureSet
 
@@ -43,6 +45,9 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "bb_squeeze": 0.7,     # Squeeze is anticipatory, not definitive
     "adx_regime": 0.8,     # Regime context
     "cvd": 1.1,            # CVD order flow — strong but unproven, slightly above 1.0
+    "bb_bounce": 1.0,      # BB bounce signal (P1-6)
+    "funding_bias": 1.1,   # Funding rate bias (P1-7)
+    "mtf_bias": 1.5,       # 15m MTF confirmation (P1-8)
 }
 
 SCORE_THRESHOLD: float = 3.0  # Minimum |score| to trigger a trade
@@ -188,8 +193,13 @@ class SignalScoring:
         weighted_breakdown: dict[str, float] = {}
         total_score = 0.0
 
+        # P1-6: Zero-weight disabled signals for current regime
+        disabled = getattr(cfg, 'DISABLED_SIGNALS_BY_REGIME', {}).get(regime, [])
+
         for signal_name, vote_value in vote_dict.items():
             w = weights.get(signal_name, 1.0)
+            if signal_name in disabled:
+                w = 0.0
             weighted_val = vote_value * w
             weighted_breakdown[signal_name] = weighted_val
             total_score += weighted_val
