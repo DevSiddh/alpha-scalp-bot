@@ -48,7 +48,7 @@ TELEGRAM_CHAT_ID: str = _env("TELEGRAM_CHAT_ID", "")
 
 # ===== Trading Pair & Timeframe =============================================
 SYMBOL: str = _env("SYMBOL", "BTC/USDT")
-TIMEFRAME: str = _env("TIMEFRAME", "3m")
+TIMEFRAME: str = "3m"  # P0-2: Hardcoded to 3m
 LOOKBACK_CANDLES: int = _env("LOOKBACK_CANDLES", "200", cast=int)
 
 # ===== Swing Trading ========================================================
@@ -92,7 +92,23 @@ DAILY_DRAWDOWN_LIMIT: float = _env("DAILY_DRAWDOWN_LIMIT", "0.03", cast=float)
 STOP_LOSS_PCT: float = _env("STOP_LOSS_PCT", "0.005", cast=float)
 TAKE_PROFIT_PCT: float = _env("TAKE_PROFIT_PCT", "0.010", cast=float)
 MAX_OPEN_POSITIONS: int = _env("MAX_OPEN_POSITIONS", "1", cast=int)
-LEVERAGE: int = _env("LEVERAGE", "5", cast=int)
+LEVERAGE: int = 2  # P0-2: Changed from 5
+
+# P0-2: New configuration parameters
+SIGNAL_THRESHOLD: float = _env("SIGNAL_THRESHOLD", "0.72", cast=float)
+SCALP_MAX_HOLD_SECONDS: int = _env("SCALP_MAX_HOLD_SECONDS", "900", cast=int)
+MAX_CONCURRENT_TRADES: int = _env("MAX_CONCURRENT_TRADES", "1", cast=int)
+MAX_DAILY_LOSS_PCT: float = _env("MAX_DAILY_LOSS_PCT", "0.03", cast=float)
+KELLY_FRACTION_CAP: float = _env("KELLY_FRACTION_CAP", "0.10", cast=float)
+MIN_POSITION_SIZE_USDT: float = _env("MIN_POSITION_SIZE_USDT", "6", cast=float)
+MAX_POSITION_SIZE_USDT: float = _env("MAX_POSITION_SIZE_USDT", "15", cast=float)
+ATR_SL_MULTIPLIER: float = _env("ATR_SL_MULTIPLIER", "1.5", cast=float)
+ATR_TP_MULTIPLIER: float = _env("ATR_TP_MULTIPLIER", "3.0", cast=float)
+ATR_PERIOD: int = _env("ATR_PERIOD", "14", cast=int)
+MIN_REWARD_RISK_RATIO: float = _env("MIN_REWARD_RISK_RATIO", "1.8", cast=float)
+ATR_RATIO_MAX: float = _env("ATR_RATIO_MAX", "2.5", cast=float)
+ATR_RATIO_MIN: float = _env("ATR_RATIO_MIN", "0.5", cast=float)
+IS_SESSION_FILTER_ENABLED: bool = _env("IS_SESSION_FILTER_ENABLED", "true", cast=bool)
 
 # ===== Strategy – EMA / RSI =================================================
 EMA_FAST: int = _env("EMA_FAST", "9", cast=int)

@@ -61,16 +61,16 @@ class OrderExecutor:
     # -------------------------------------------------------------------------
     # P0-1: Position Reconcile on Restart
     # -------------------------------------------------------------------------
-    async def reconcile_position(self, trade_tracker) -> bool:
+    async def reconcile_position(self, trade_tracker, telegram_alerts) -> bool:
         """On startup: check for open positions/orders and restore into TradeTrackerV2.
 
         Returns True if an open position was found and restored.
         """
         try:
-            positions = await asyncio.get_event_loop().run_in_executor(
+            positions = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: self.exchange.fetch_positions([self.symbol])
             )
-            open_orders = await asyncio.get_event_loop().run_in_executor(
+            open_orders = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: self.exchange.fetch_open_orders(self.symbol)
             )
 
@@ -106,6 +106,7 @@ class OrderExecutor:
                 sl_price=sl_price,
                 tp_price=tp_price,
             )
+            await telegram.send_message("⚠️ Open position restored on restart")
             return True
 
         except Exception as exc:

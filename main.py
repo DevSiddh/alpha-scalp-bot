@@ -280,6 +280,97 @@ async def _stats_poller(
 
 
 # ---------------------------------------------------------------------------
+# P0-1: Position Reconcile on Restart
+# ---------------------------------------------------------------------------
+async def reconcile_positions(
+    exchange: ccxt.Exchange,
+    executor: OrderExecutor,
+    tracker: TradeTrackerV2,
+    alerts: TelegramAlerts,
+) -> None:
+    """On startup: fetch positions + open orders via ccxt.
+
+    - If open position: restore into TradeTrackerV2, send Telegram alert "⚠️ Open position restored on restart"
+    - If orphan orders (orders with no position): cancel via ccxt
+    - Log summary of reconciliation
+    """
+    positions_restored = 0
+    orders_cancelled = 0
+
+    try:
+        # Fetch positions and open orders
+        positions = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: exchange.fetch_positions([cfg.SYMBOL])
+        )
+        open_orders = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: exchange.fetch_open_orders(cfg.SYMBOL)
+        )
+
+        # Check for open positions
+        active_positions = [p for p in positions if abs(float(p.get("contracts", 0) or 0)) > 0]
+
+        if active_positions:
+            pos = active_positions[0]
+            side = "long" if float(pos.get("contracts", 0)) > 0 else "short"
+            entry_price = float(pos.get("entryPrice") or pos.get("info", {}).get("entryPrice", 0))
+            contracts = abs(float(pos.get("contracts", 0)))
+
+            logger.warning(
+                "Reconcile: OPEN POSITION FOUND | side={} entry={:.4f} contracts={:.6f}",
+                side.upper(), entry_price, contracts,
+            )
+
+            # Find SL/TP from open bracket orders if available
+            sl_price, tp_price = 0.0, 0.0
+            for o in open_orders:
+                otype = (o.get("type") or "").lower()
+                if "stop" in otype:
+                    sl_price = float(o.get("stopPrice") or o.get("price") or 0)
+                elif otype in ("take_profit", "take_profit_market", "limit"):
+                    tp_price = float(o.get("stopPrice") or o.get("price") or 0)
+
+            # Restore into TradeTrackerV2
+            tracker.restore_open_position(
+                symbol=cfg.SYMBOL,
+                side=side.upper(),
+                entry_price=entry_price,
+                contracts=contracts,
+                sl_price=sl_price,
+                tp_price=tp_price,
+            )
+            positions_restored = 1
+
+            # Send Telegram alert
+            await alerts.send_message(
+                f"⚠️ Open position restored on restart\n"
+                f"Symbol: {cfg.SYMBOL}\n"
+                f"Side: {side.upper()}\n"
+                f"Entry: {entry_price:.4f}\n"
+                f"Contracts: {contracts:.6f}\n"
+                f"SL: {sl_price:.4f if sl_price else 'N/A'}\n"
+                f"TP: {tp_price:.4f if tp_price else 'N/A'}"
+            )
+
+        # Check for orphan orders (orders with no position)
+        if not active_positions and open_orders:
+            logger.warning("Reconcile: Found {} orphan orders - cancelling", len(open_orders))
+            for order in open_orders:
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda o=order: exchange.cancel_order(o["id"], cfg.SYMBOL)
+                    )
+                    orders_cancelled += 1
+                    logger.info("Cancelled orphan order {}", order.get("id"))
+                except Exception as exc:
+                    logger.error("Failed to cancel orphan order {}: {}", order.get("id"), exc)
+
+        logger.info("Reconciled: {} positions restored, {} orders cancelled", positions_restored, orders_cancelled)
+
+    except Exception as exc:
+        logger.error("Reconcile positions failed: {}", exc)
+
+
+# ---------------------------------------------------------------------------
 # Main async loop
 # ---------------------------------------------------------------------------
 async def run_bot_polling() -> None:  # noqa: C901
@@ -301,8 +392,8 @@ async def run_bot_polling() -> None:  # noqa: C901
     tracker = TradeTrackerV2()
     risk.set_trade_tracker(tracker)
 
-    # P0-1: Reconcile open position on restart
-    await executor.reconcile_position(tracker)
+    # P0-1: Reconcile open position on restart (BEFORE WebSocket streams)
+    await reconcile_positions(exchange, executor, tracker, alerts)
 
     # ── Phase 1: Alpha Engine pipeline ──
     feature_cache = FeatureCache()
@@ -773,8 +864,8 @@ async def run_bot_ws() -> None:
     tracker = TradeTrackerV2()
     risk.set_trade_tracker(tracker)
 
-    # P0-1: Reconcile open position on restart
-    await executor.reconcile_position(tracker)
+    # P0-1: Reconcile open position on restart (BEFORE WebSocket streams)
+    await reconcile_positions(exchange, executor, tracker, alerts)
 
     feature_cache = FeatureCache()
     alpha_engine = AlphaEngine()
