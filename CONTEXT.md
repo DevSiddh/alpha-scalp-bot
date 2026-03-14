@@ -309,7 +309,7 @@ Regime-specific signal disabling is defined in `DISABLED_SIGNALS_BY_REGIME` conf
 | P1-9 | Done | Dynamic leverage scaling on drawdown |
 | P1-10 | Done | Profit factor gate for weight optimizer |
 | P2 | Done | LLM weight optimizer (WeightOptimizer) |
-| P3 | Planned | ML model integration |
+| P3 | SKIP | ML model integration — superseded by LLM WeightOptimizer (P2) |
 
 ---
 
