@@ -38,6 +38,25 @@ class TelegramAlerts:
         if not self.enabled:
             logger.warning("Telegram alerts disabled – missing BOT_TOKEN or CHAT_ID")
 
+    def _get_mode_tag(self) -> str:
+        if getattr(cfg, "PAPER_TRADING_MODE", False):
+            return "📄 PAPER"
+        elif getattr(cfg, "BINANCE_DEMO_TRADING", False):
+            return "🧪 DEMO"
+        return "⚡️ LIVE"
+
+    def _get_regime_display(self, regime: str) -> str:
+        r = regime.upper()
+        if "TRENDING_UP" in r:
+            return f"{r} 📈"
+        elif "TRENDING_DOWN" in r:
+            return f"{r} 📉"
+        elif "RANGING" in r:
+            return f"{r} 📊"
+        elif "VOLATILE" in r:
+            return f"{r} 🌪"
+        return r
+
     # =================================================================
     # Core send with rate-limit
     # =================================================================
@@ -108,8 +127,9 @@ class TelegramAlerts:
     ) -> bool:
         """Send enriched trade entry alert with premium signal metadata."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        icon = "LONG" if side.upper() == "BUY" else "SHORT"
+        icon = "🟢 LONG" if side.upper() == "BUY" else "🔴 SHORT"
         tag = strategy.upper()
+        mode_tag = self._get_mode_tag()
 
         # Premium signal details
         premium_lines = []
@@ -117,7 +137,7 @@ class TelegramAlerts:
             vol_icon = "HIGH" if volume_mult >= 2.0 else "OK"
             premium_lines.append(f"Volume   : <code>{volume_mult:.1f}x avg</code> [{vol_icon}]")
         if regime:
-            regime_display = regime.upper()
+            regime_display = self._get_regime_display(regime)
             premium_lines.append(f"Regime   : <code>{regime_display}</code>")
         if bb_squeeze:
             premium_lines.append(f"BB Squeeze: <code>BREAKOUT DETECTED</code>")
@@ -126,7 +146,12 @@ class TelegramAlerts:
         if atr_value is not None:
             premium_lines.append(f"ATR      : <code>{atr_value:.4f}</code>")
         if confidence is not None:
-            conf_label = "STRONG" if confidence >= 0.75 else "MODERATE" if confidence >= 0.5 else "WEAK"
+            if confidence >= 0.80:
+                conf_label = "🔥 STRONG"
+            elif confidence >= 0.60:
+                conf_label = "✅ SOLID"
+            else:
+                conf_label = "⚠️ WEAK"
             premium_lines.append(f"Signal   : <code>{confidence:.0%} confidence</code> [{conf_label}]")
 
         premium_block = ""
@@ -144,7 +169,7 @@ class TelegramAlerts:
         rr = reward / risk if risk > 0 else 0
 
         text = (
-            f"<b>[{icon}] {tag} Entry | {symbol}</b>\n"
+            f"<b>{icon} {tag} Entry | {symbol} | {mode_tag}</b>\n"
             f"\n"
             f"Entry  : <code>{entry_price:,.4f}</code>\n"
             f"SL     : <code>{stop_loss:,.4f}</code>\n"
@@ -177,8 +202,22 @@ class TelegramAlerts:
     ) -> bool:
         """Send enriched trade close alert."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        result = "WIN" if pnl >= 0 else "LOSS"
         tag = strategy.upper()
+
+        er_lower = exit_reason.lower()
+        if "tp" in er_lower:
+            prefix = "🎯 TP HIT"
+        elif "sl" in er_lower:
+            prefix = "🛑 STOP LOSS"
+        elif "time_stop" in er_lower:
+            prefix = "⏰ TIME STOP"
+        elif "trail" in er_lower:
+            prefix = "🪢 TRAIL EXIT"
+        else:
+            prefix = "ℹ️ EXIT"
+
+        pnl_icon = "✅" if pnl > 0 else "⚠️"
+        mode_tag = self._get_mode_tag()
 
         # Exit reason details
         exit_lines = []
@@ -193,7 +232,7 @@ class TelegramAlerts:
         exit_block = "\n".join(exit_lines) + "\n" if exit_lines else ""
 
         text = (
-            f"<b>[{result}] {tag} Close | {symbol}</b>\n"
+            f"<b>{prefix} {pnl_icon} | {tag} Close | {symbol} | {mode_tag}</b>\n"
             f"\n"
             f"Entry  : <code>{entry_price:,.4f}</code>\n"
             f"Exit   : <code>{exit_price:,.4f}</code>\n"
@@ -219,10 +258,11 @@ class TelegramAlerts:
     ) -> bool:
         """Alert when ATR trailing stop activates after min-profit threshold."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        direction = "LONG" if side.upper() == "BUY" else "SHORT"
+        direction = "🟢 LONG" if side.upper() == "BUY" else "🔴 SHORT"
+        mode_tag = self._get_mode_tag()
 
         text = (
-            f"<b>[TRAIL] Trailing Stop Active | {symbol}</b>\n"
+            f"<b>[TRAIL] Trailing Stop Active | {symbol} | {mode_tag}</b>\n"
             f"\n"
             f"Side     : <code>{direction}</code>\n"
             f"Entry    : <code>{entry_price:,.4f}</code>\n"
@@ -249,9 +289,10 @@ class TelegramAlerts:
         """Alert when Bollinger Band squeeze breakout is detected."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
         dir_label = direction.upper()  # "BULLISH" or "BEARISH"
+        mode_tag = self._get_mode_tag()
 
         text = (
-            f"<b>[SQUEEZE] BB Breakout | {symbol}</b>\n"
+            f"<b>[SQUEEZE] BB Breakout | {symbol} | {mode_tag}</b>\n"
             f"\n"
             f"Direction : <code>{dir_label}</code>\n"
             f"Price     : <code>{current_price:,.4f}</code>\n"
@@ -274,12 +315,15 @@ class TelegramAlerts:
     ) -> bool:
         """Alert when market regime changes (trending <-> ranging)."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        mode_tag = self._get_mode_tag()
+        old_display = self._get_regime_display(old_regime)
+        new_display = self._get_regime_display(new_regime)
 
         text = (
-            f"<b>[REGIME] Market Shift | {symbol}</b>\n"
+            f"<b>[REGIME] Market Shift | {symbol} | {mode_tag}</b>\n"
             f"\n"
-            f"From : <code>{old_regime.upper()}</code>\n"
-            f"To   : <code>{new_regime.upper()}</code>\n"
+            f"From : <code>{old_display}</code>\n"
+            f"To   : <code>{new_display}</code>\n"
             f"ADX  : <code>{adx_value:.1f}</code>\n"
             f"\n"
             f"<i>Strategy parameters auto-adjusted | {now}</i>"
@@ -297,13 +341,14 @@ class TelegramAlerts:
     ) -> bool:
         """Alert when a new trade is blocked by concurrent trade limiter."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        mode_tag = self._get_mode_tag()
 
         rejected_line = ""
         if rejected_symbol:
             rejected_line = f"Rejected : <code>{rejected_symbol}</code>\n"
 
         text = (
-            f"<b>[LIMIT] Max Trades Reached</b>\n"
+            f"<b>[LIMIT] Max Trades Reached | {mode_tag}</b>\n"
             f"\n"
             f"Open     : <code>{current_open}/{max_allowed}</code>\n"
             f"{rejected_line}"
@@ -324,9 +369,10 @@ class TelegramAlerts:
     ) -> bool:
         """Alert when daily P&L circuit breaker trips."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        mode_tag = self._get_mode_tag()
 
         text = (
-            f"<b>[CIRCUIT BREAKER] Trading Paused</b>\n"
+            f"<b>[CIRCUIT BREAKER] Trading Paused | {mode_tag}</b>\n"
             f"\n"
             f"Daily P&L : <code>{daily_pnl:+,.2f} USDT ({daily_pnl_pct:+.2f}%)</code>\n"
             f"Threshold : <code>{threshold_pct:.1%} daily loss</code>\n"
@@ -354,6 +400,7 @@ class TelegramAlerts:
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
         s = session_stats
         c = cumulative_stats or {}
+        mode_tag = self._get_mode_tag()
 
         pf = c.get("profit_factor", 0)
         pf_str = f"{pf:.2f}" if pf != float("inf") else "INF"
@@ -368,7 +415,7 @@ class TelegramAlerts:
         if circuit_breaker_active:
             risk_lines.append(f"Circuit  : <code>TRIPPED (paused)</code>")
         if current_regime:
-            risk_lines.append(f"Regime   : <code>{current_regime.upper()}</code>")
+            risk_lines.append(f"Regime   : <code>{self._get_regime_display(current_regime)}</code>")
 
         risk_block = ""
         if risk_lines:
@@ -380,7 +427,7 @@ class TelegramAlerts:
             )
 
         text = (
-            f"<b>[STATS] Alpha-Scalp Bot</b>\n"
+            f"<b>[STATS] Alpha-Scalp Bot | {mode_tag}</b>\n"
             f"\n"
             f"<b>-- Session --</b>\n"
             f"Trades : <code>{s.get('total_trades', 0)}</code>\n"
@@ -409,8 +456,9 @@ class TelegramAlerts:
     async def send_kill_switch_alert(self) -> bool:
         """Send an urgent warning when the daily kill switch activates."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        mode_tag = self._get_mode_tag()
         text = (
-            f"<b>[WARNING] KILL SWITCH ACTIVATED</b>\n"
+            f"<b>[WARNING] KILL SWITCH ACTIVATED | {mode_tag}</b>\n"
             f"\n"
             f"Daily drawdown limit ({cfg.DAILY_DRAWDOWN_LIMIT:.1%}) reached.\n"
             f"All trading halted until next UTC midnight.\n"
@@ -439,6 +487,7 @@ class TelegramAlerts:
         """Send end-of-day summary with premium metrics."""
         pnl_icon = "PROFIT" if pnl >= 0 else "LOSS"
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        mode_tag = self._get_mode_tag()
 
         balance_line = ""
         if start_balance is not None and end_balance is not None:
@@ -483,7 +532,7 @@ class TelegramAlerts:
             )
 
         text = (
-            f"<b>[{pnl_icon}] DAILY SUMMARY | {date_str}</b>\n"
+            f"<b>[{pnl_icon}] DAILY SUMMARY | {mode_tag} | {date_str}</b>\n"
             f"\n"
             f"P&L    : <code>{pnl:+,.2f} USDT</code>\n"
             f"Trades : <code>{trades}</code>\n"
@@ -502,8 +551,9 @@ class TelegramAlerts:
     async def send_error_alert(self, error: str | Exception) -> bool:
         """Send an error notification to the operator."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        mode_tag = self._get_mode_tag()
         text = (
-            f"<b>[ERROR] Bot Error</b>\n"
+            f"<b>[ERROR] Bot Error | {mode_tag}</b>\n"
             f"\n"
             f"<code>{str(error)[:500]}</code>\n"
             f"\n"
@@ -517,7 +567,15 @@ class TelegramAlerts:
     async def send_startup_message(self) -> bool:
         """Announce bot start with premium feature status."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        mode = "DEMO (Paper)" if cfg.BINANCE_DEMO_TRADING else "LIVE"
+
+        if getattr(cfg, "PAPER_TRADING_MODE", False):
+            mode = "PAPER (📄 Local)"
+        elif getattr(cfg, "BINANCE_DEMO_TRADING", False):
+            mode = "DEMO (🧪 Binance)"
+        else:
+            mode = "LIVE (⚡️ Real)"
+            
+        mode_tag = self._get_mode_tag()
 
         # Premium features status
         premium_features = []
@@ -550,7 +608,7 @@ class TelegramAlerts:
             )
 
         text = (
-            f"<b>[START] Alpha-Scalp Bot PREMIUM</b>\n"
+            f"<b>[START] Alpha-Scalp Bot PREMIUM | {mode_tag}</b>\n"
             f"\n"
             f"Exchange : <code>Binance Futures</code>\n"
             f"Mode     : <code>{mode}</code>\n"
@@ -632,14 +690,16 @@ class TelegramAlerts:
         """Send periodic heartbeat to confirm bot is alive and trading."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
         book_status = "OK" if book_ok else "REBUILDING"
+        mode_tag = self._get_mode_tag()
+        regime_display = self._get_regime_display(regime)
         text = (
-            f"<b>[PULSE] Alpha-Scalp Bot Alive</b>\n"
+            f"<b>[PULSE] Alpha-Scalp Bot Alive | {mode_tag}</b>\n"
             f"\n"
             f"Uptime    : <code>{uptime_str}</code>\n"
             f"Book      : <code>{book_status}</code>\n"
             f"Spread    : <code>{spread_bps:.1f} bps</code>\n"
             f"Last Sig  : <code>{last_signal} ({last_score:+.2f})</code>\n"
-            f"Regime    : <code>{regime}</code>\n"
+            f"Regime    : <code>{regime_display}</code>\n"
             f"Trades    : <code>{total_trades} (session) / {cumulative_trades} (all-time)</code>\n"
             f"PnL       : <code>${session_pnl:+.2f} (session) / ${cumulative_pnl:+.2f} (all-time)</code>\n"
             f"\n"
@@ -653,8 +713,9 @@ class TelegramAlerts:
     async def send_shutdown_message(self, reason: str = "Manual stop") -> bool:
         """Announce that the bot is shutting down."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        mode_tag = self._get_mode_tag()
         text = (
-            f"<b>[STOP] Alpha-Scalp Bot Offline</b>\n"
+            f"<b>[STOP] Alpha-Scalp Bot Offline | {mode_tag}</b>\n"
             f"\n"
             f"Reason : <code>{reason}</code>\n"
             f"Time   : <code>{now}</code>"
@@ -677,7 +738,8 @@ class TelegramAlerts:
     ) -> bool:
         """Send swing trade entry alert."""
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        icon = "LONG" if side.lower() in ("buy", "long") else "SHORT"
+        icon = "🟢 LONG" if side.lower() in ("buy", "long") else "🔴 SHORT"
+        mode_tag = self._get_mode_tag()
 
         risk_amt = abs(entry - sl)
         reward_amt = abs(tp - entry)
@@ -685,7 +747,12 @@ class TelegramAlerts:
 
         detail_lines = []
         if confidence is not None:
-            conf_label = "STRONG" if confidence >= 0.75 else "MODERATE" if confidence >= 0.5 else "WEAK"
+            if confidence >= 0.80:
+                conf_label = "🔥 STRONG"
+            elif confidence >= 0.60:
+                conf_label = "✅ SOLID"
+            else:
+                conf_label = "⚠️ WEAK"
             detail_lines.append(f"Signal   : <code>{confidence:.0%} confidence</code> [{conf_label}]")
         if reason:
             detail_lines.append(f"Reason   : <code>{reason}</code>")
@@ -700,7 +767,7 @@ class TelegramAlerts:
             )
 
         text = (
-            f"<b>[{icon}] SWING Entry | {symbol}</b>\n"
+            f"<b>{icon} SWING Entry | {symbol} | {mode_tag}</b>\n"
             f"\n"
             f"Entry  : <code>{entry:,.4f}</code>\n"
             f"SL     : <code>{sl:,.4f}</code>\n"
