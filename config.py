@@ -96,7 +96,7 @@ LEVERAGE: int = 2  # P0-2: Changed from 5
 
 # P0-2: New configuration parameters
 SIGNAL_THRESHOLD: float = _env("SIGNAL_THRESHOLD", "0.72", cast=float)
-SCALP_MAX_HOLD_SECONDS: int = _env("SCALP_MAX_HOLD_SECONDS", "900", cast=int)
+SCALP_MAX_HOLD_SECONDS: int = _env("SCALP_MAX_HOLD_SECONDS", "2700", cast=int)
 MAX_CONCURRENT_TRADES: int = _env("MAX_CONCURRENT_TRADES", "1", cast=int)
 MAX_DAILY_LOSS_PCT: float = _env("MAX_DAILY_LOSS_PCT", "0.03", cast=float)
 KELLY_FRACTION_CAP: float = _env("KELLY_FRACTION_CAP", "0.10", cast=float)
@@ -146,7 +146,7 @@ SCALP_TRAIL_DELTA_PCT: float = _env("SCALP_TRAIL_DELTA_PCT", "0.002", cast=float
 # ===== PREMIUM: Scalp Time Stop (max hold duration) =========================
 # Force-close scalp positions after N seconds if TP/SL not hit.
 # Edge from microstructure signals decays fast -- 180s = 3 candles on 1m.
-SCALP_MAX_HOLD_SECONDS: int = _env("SCALP_MAX_HOLD_SECONDS", "900", cast=int)
+SCALP_MAX_HOLD_SECONDS: int = _env("SCALP_MAX_HOLD_SECONDS", "2700", cast=int)
 
 # ===== PREMIUM: Concurrent Trade Limiter ====================================
 MAX_CONCURRENT_TRADES: int = _env("MAX_CONCURRENT_TRADES", "1", cast=int)

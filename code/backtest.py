@@ -306,10 +306,14 @@ class Backtester:
         print(SEP)
         print("  Win trades:  {:>4}".format(len(wins)))
         print("  Loss trades: {:>4}".format(len(losses)))
-        print("  TP hits:     {:>4}".format(reasons.get("tp", 0)))
-        print("  SL hits:     {:>4}".format(reasons.get("sl", 0)))
-        print("  Time stops:  {:>4}".format(reasons.get("time_stop", 0)))
-        print("  Trail stops: {:>4}".format(reasons.get("trail", 0)))
+        tp_n    = reasons.get("tp", 0)
+        sl_n    = reasons.get("sl", 0)
+        ts_n    = reasons.get("time_stop", 0)
+        tr_n    = reasons.get("trail", 0)
+        print("  TP hits:     {:>4}  ({:.0%})".format(tp_n, tp_n/n))
+        print("  SL hits:     {:>4}  ({:.0%})".format(sl_n, sl_n/n))
+        print("  Time stops:  {:>4}  ({:.0%})".format(ts_n, ts_n/n))
+        print("  Trail stops: {:>4}  ({:.0%})".format(tr_n, tr_n/n))
         print(SEP)
 
         # Regime breakdown
@@ -348,7 +352,7 @@ class Backtester:
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Alpha-Scalp Backtest (3m / OKX)")
-    parser.add_argument("--bars",   type=int,   default=500,         help="Number of 3m candles to fetch")
+    parser.add_argument("--bars",   type=int,   default=3000,         help="Number of 3m candles to fetch")
     parser.add_argument("--fees",   action="store_true",             help="Include 0.04% maker fee")
     parser.add_argument("--symbol", type=str,   default="BTC/USDT",  help="Trading pair")
     parser.add_argument("--debug",  action="store_true",             help="Print every vote, score, rejection reason")
