@@ -13,7 +13,7 @@ Alpha-Scalp Bot is an async Python quant trading bot for Binance Futures (USDT-M
 Core characteristics:
 - Exchange: Binance Futures (fapi.binance.com / demo-fapi.binance.com)
 - Default symbol: BTC/USDT (configurable)
-- Primary timeframe: 1m candles (scalping)
+- Primary timeframe: 3m candles (scalping)
 - Secondary timeframe: 4h candles (swing overlay)
 - Tertiary timeframe: 15m candles (MTF confirmation, P1-8)
 - Leverage: per-token configurable (TOKEN_LEVERAGE), default 5x
