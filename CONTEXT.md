@@ -15,6 +15,7 @@ Core characteristics:
 - Default symbol: BTC/USDT (configurable)
 - Primary timeframe: 1m candles (scalping)
 - Secondary timeframe: 4h candles (swing overlay)
+- Tertiary timeframe: 15m candles (MTF confirmation, P1-8)
 - Leverage: per-token configurable (TOKEN_LEVERAGE), default 5x
 - Mode: DEMO (paper trading via Binance Demo Trading) and LIVE
 - Signals: multi-factor voting system with dynamic LLM-optimized weights
@@ -70,7 +71,7 @@ Tech stack:
 
 [WeightOptimizer] - weekly LLM weight tuning from TradeTrackerV2 stats (profit factor gate)
 [ScalpStrategy]   - premium NW-envelope + ADX + Kelly + session-filter signal engine
-[SwingStrategy]   - parallel 4h EMA50/200 + RSI + S/R swing signal engine
+[SwingStrategy]   - parallel 4h EMA50/200 + RSI + S/R + 15m MTF confirmation (P1-8)
 [Backtester]      - offline PnL replay using FeatureCache -> AlphaEngine -> SignalScoring
 ```
 
@@ -90,18 +91,19 @@ Dual execution modes in main.py:
 | market_state.py | Shared in-memory state: OHLCV ring buffer, order book (from WS diffs), last trade price, book health. |
 | state_dispatcher.py | Async PriorityQueue dispatcher. 4 priority tiers, coalescing, backpressure. Fires PipelineCallbacks. |
 | feature_cache.py | Computes EMA/RSI/MACD/BB/ATR/VWAP/OBV/VolMA on OHLCV. Caches result per candle. |
-| alpha_engine.py | 9-signal voter (ema_cross, rsi_zone, macd_cross, bb_bounce, bb_squeeze, vwap_cross, obv_trend, volume_spike, swing_bias). |
+| alpha_engine.py | 11-signal voter: ema_cross, rsi_zone, macd_cross, bb_bounce, bb_squeeze, vwap_cross, obv_trend, volume_spike, swing_bias, funding_bias, mtf_bias. |
 | signal_scoring.py | Weighted score aggregation, regime detection, confidence gating. Loads weights.json. |
 | risk_engine.py | ATR SL/TP, regime-adjusted sizing, Kelly, circuit breaker, kill switch, balance cache, swing risk methods. |
 | order_executor.py | ccxt order execution (market + SL/TP bracket), get_position_info, close_position, cancel_all_orders, slippage model. |
 | strategy.py | ScalpStrategy: NW kernel envelope + EMA9/21 + RSI + ADX + volume + BB squeeze + session filter + Kelly. |
-| swing_strategy.py | SwingStrategy: 4h EMA50/200 + RSI zone + S/R pivot detection + volume + ATR. |
+| swing_strategy.py | SwingStrategy: 4h EMA50/200 + RSI zone + S/R pivot detection + volume + ATR + 15m MTF confirmation (P1-8). |
 | trade_tracker_v2.py | JSONL trade persistence, signal attribution, session/cumulative stats, restore_open_position(). |
 | weight_optimizer.py | LLM-based signal weight tuner. Profit factor gate (PF >= 1.2). Weekly cadence, 30 trade threshold. |
 | telegram_alerts.py | Full alert suite: entry, exit, regime, circuit breaker, kill switch, heartbeat, daily summary, /stats, startup/shutdown. |
 | backtest.py | PnL backtester: full production pipeline, ATR trailing stop, time stop, per-regime breakdown, equity curve. |
-| weights.json | Default signal weights (overwritten by WeightOptimizer). |
+| weights.json | Default signal weights (overwritten by WeightOptimizer). 11 signals as of P1-8. |
 | tests/test_bugs.py | Regression suite: 8 tests covering B1-B5. |
+| tests/test_mtf_bias.py | 3 tests covering P1-8 MTF bias vote (BUY/SELL/HOLD). |
 | requirements.txt | Python dependencies. |
 | .env.example | Environment variable template. |
 
@@ -165,6 +167,16 @@ SWING_RSI_SHORT_HIGH    - default: 60
 SWING_LEVERAGE          - swing position leverage
 SWING_LOOKBACK_CANDLES  - 4h candle history depth
 SWING_CHECK_INTERVAL    - seconds between swing checks
+```
+
+**MTF (15m) Confirmation (P1-8):**
+```
+MTF_TIMEFRAME           - default: 15m
+MTF_LOOKBACK_CANDLES    - default: 50
+MTF_CACHE_SECONDS       - default: 900 (15 minutes)
+MTF_EMA_FAST            - default: 8
+MTF_EMA_SLOW            - default: 20
+MTF_RSI_PERIOD          - default: 14
 ```
 
 **LLM Weight Optimizer:**
@@ -304,7 +316,7 @@ close        - latest close price
 
 Multi-signal voter. Each signal independently votes BUY / SELL / HOLD.
 
-**Signals (9 total):**
+**Signals (11 total as of P1-8):**
 
 | Signal | BUY Condition | SELL Condition |
 |---|---|---|
@@ -317,6 +329,8 @@ Multi-signal voter. Each signal independently votes BUY / SELL / HOLD.
 | obv_trend | OBV slope positive (N bars) | OBV slope negative (N bars) |
 | volume_spike | Volume > 2x vol_ma (confirms) | Volume > 2x vol_ma (confirms) |
 | swing_bias | 4h EMA golden cross + RSI zone | 4h EMA death cross + RSI zone |
+| funding_bias (P1-7) | Funding rate negative (longs paid) | Funding rate high positive | 
+| mtf_bias (P1-8) | 15m EMA8 > EMA20 AND RSI > 45 | 15m EMA8 < EMA20 AND RSI < 55 |
 
 **Vote interface (frozen):**
 ```python
@@ -324,6 +338,9 @@ Vote(direction: str, strength: float, reason: str)
 # direction: "BUY" | "SELL" | "HOLD"
 # strength: 0.0 to 1.0
 ```
+
+**AlphaVotes slots:** ema_cross, rsi_zone, macd_cross, bb_bounce, bb_squeeze,
+vwap_cross, obv_trend, volume_spike, swing_bias, funding_bias, mtf_bias
 
 **Output:** `VoteSet` - dict of `{signal_name: Vote}`
 
@@ -348,18 +365,22 @@ RANGING        - bb_squeeze active, EMAs flat
 VOLATILE       - ATR > 2x average ATR
 ```
 
-**weights.json defaults:**
+**weights.json (current — 11 signals, as of P1-8):**
 ```json
 {
-  "ema_cross":    1.5,
-  "rsi_zone":     1.2,
-  "macd_cross":   1.3,
-  "bb_bounce":    1.0,
-  "bb_squeeze":   1.1,
-  "vwap_cross":   1.0,
-  "obv_trend":    0.8,
-  "volume_spike": 0.9,
-  "swing_bias":   1.4
+  "default": {
+    "ema_cross":    1.4,
+    "rsi_zone":     1.2,
+    "macd_cross":   1.2,
+    "bb_bounce":    1.0,
+    "bb_squeeze":   1.3,
+    "vwap_cross":   1.1,
+    "obv_trend":    0.9,
+    "volume_spike": 1.0,
+    "swing_bias":   2.0,
+    "funding_bias": 1.1,
+    "mtf_bias":     1.6
+  }
 }
 ```
 WeightOptimizer overwrites this file periodically (subject to profit factor gate).
@@ -496,7 +517,7 @@ class _SafeInterceptHandler(logging.Handler):
 - Runs every `SWING_CHECK_INTERVAL` seconds
 - Iterates `SWING_SYMBOLS`, skips if already have position for that symbol
 - Checks `check_swing_max_positions()` and `check_swing_total_exposure()` before loop
-- Fetches 4h OHLCV, runs SwingStrategy, executes if BUY/SELL
+- Fetches 4h OHLCV, runs SwingStrategy (which now also fetches 15m for MTF), executes if BUY/SELL
 - Sends `send_swing_trade_alert()` on fill
 
 **Weight optimizer trigger:**
@@ -571,7 +592,7 @@ volume_ratio, bb_squeeze, kelly_fraction
 
 ## 15. SwingStrategy (swing_strategy.py)
 
-Higher-timeframe (4h) directional bias. Class: `SwingStrategy`
+Higher-timeframe (4h) directional bias with 15m MTF confirmation. Class: `SwingStrategy`
 
 **Signals:**
 1. **EMA 50/200 Golden/Death Cross** - primary trend
@@ -583,8 +604,20 @@ Higher-timeframe (4h) directional bias. Class: `SwingStrategy`
    - support = mean of bottom 3 recent swing lows
 4. **Volume confirmation** - above-average volume required
 5. **ATR** - dynamic SL sizing
+6. **15m MTF Confirmation (P1-8)** - `_compute_mtf_vote()`
+   - Fetches last 50 bars of 15m klines (same REST method as 4h)
+   - Cached in memory for 15 minutes (refreshes on new 15m candle close)
+   - Computes EMA(8), EMA(20), RSI(14) on 15m close prices
+   - Produces `mtf_bias` Vote:
+     - EMA8 > EMA20 AND RSI > 45 -> Vote("BUY", strength=0.7, "15m MTF bullish")
+     - EMA8 < EMA20 AND RSI < 55 -> Vote("SELL", strength=0.7, "15m MTF bearish")
+     - else                       -> Vote("HOLD", strength=0.0, "15m MTF neutral")
+   - Vote fed into AlphaEngine via `generate_votes_with_mtf()` convenience method
 
-**Key method:** `calculate_signals(df: DataFrame, symbol: str) -> SwingTradeSignal`
+**Key methods:**
+- `calculate_signals(df: DataFrame, symbol: str) -> SwingTradeSignal`
+- `_compute_mtf_vote(symbol: str) -> Vote` (P1-8)
+- `generate_votes_with_mtf(features, symbol) -> VoteSet` (P1-8)
 
 **SwingTradeSignal fields:**
 ```python
@@ -759,7 +792,7 @@ python backtest.py --symbol ETH/USDT  # different pair
    -> Kill switch check -> skip if active
    -> state.get_candle_df() -> DataFrame
    -> FeatureCache.compute(df) -> FeatureSet
-   -> AlphaEngine.generate_votes(features) -> VoteSet (9 signals)
+   -> AlphaEngine.generate_votes(features) -> VoteSet (11 signals)
    -> SignalScoring.score(votes, features) -> ScoredSignal
 
 4. If ScoredSignal.action in ("BUY", "SELL"):
@@ -775,6 +808,7 @@ python backtest.py --symbol ETH/USDT  # different pair
    -> For each SWING_SYMBOL not already in position:
       -> fetch_swing_ohlcv() -> 4h DataFrame
       -> SwingStrategy.calculate_signals() -> SwingTradeSignal
+         (internally fetches + caches 15m klines for MTF vote)
       -> If BUY/SELL: risk sizing -> execute -> swing alert
 
 6. Position monitor (if time since last >= POSITION_MONITOR_INTERVAL):
@@ -825,6 +859,8 @@ python backtest.py --symbol ETH/USDT  # different pair
 | P1-4 | Volatility filter | DONE (VOLATILE regime in SignalScoring) |
 | P1-5 | Session filter | DONE (ScalpStrategy session dead zones + active sessions) |
 | P1-6 | Regime disabling | DONE (regime-based signal gating in AlphaEngine/ScalpStrategy) |
+| P1-7 | Funding rate bias signal | DONE (alpha_engine.py FundingRateCache + generate_funding_bias_vote()) |
+| P1-8 | 15m MTF confirmation | DONE (swing_strategy.py _compute_mtf_vote(), 15m cache, EMA8/20 + RSI14) |
 | P1-10 | Drawdown leverage + profit factor gate | DONE (WeightOptimizer PF gate) |
 
 ---
@@ -907,10 +943,9 @@ python main.py
 
 ---
 
-## 26. Test Suite (tests/test_bugs.py)
+## 26. Test Suite
 
-**Run:** `pytest tests/test_bugs.py -v`
-**Result:** 8/8 pass
+**tests/test_bugs.py** — `pytest tests/test_bugs.py -v` — 8/8 pass
 
 | Test | Bug | What it verifies |
 |---|---|---|
@@ -922,6 +957,14 @@ python main.py
 | test_b4_kelly_loss_accumulation | B4 | update_kelly_stats() accumulates _total_losses_r on loss |
 | test_b4_kelly_win_accumulation | B4 | update_kelly_stats() accumulates _total_wins_r on win |
 | test_b5_queue_overflow_drops_incoming | B5 | low-priority incoming event dropped on queue full |
+
+**tests/test_mtf_bias.py** — `pytest tests/test_mtf_bias.py -v` — 3/3 pass
+
+| Test | Phase | What it verifies |
+|---|---|---|
+| test_mtf_buy_vote | P1-8 | EMA8 > EMA20 AND RSI=50 -> BUY, strength=0.7 |
+| test_mtf_sell_vote | P1-8 | EMA8 < EMA20 AND RSI=50 -> SELL, strength=0.7 |
+| test_mtf_hold_vote | P1-8 | EMA8 == EMA20 -> HOLD, strength=0.0 |
 
 ---
 
@@ -952,7 +995,7 @@ RiskDecision(allowed, reason, position_size, kelly_fraction)
 TradeTrackerV2 JSONL format
 
 ALREADY DONE:
-B1-B5, P0-1, P0-2, P1-1 through P1-6, P1-10
+B1-B5, P0-1, P0-2, P1-1 through P1-8, P1-10
 
 [PASTE CONTEXT.md HERE]
 
