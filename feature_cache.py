@@ -74,6 +74,11 @@ class FeatureSet:
     cvd_slope: float = 0.0  # normalised slope over lookback (-1 to +1)
     cvd_divergence: int = 0  # +1 bullish div (price down, CVD up), -1 bearish, 0 none
 
+    # --- Order Book Imbalance (P1-9) ---
+    ob_imbalance: float = 0.0
+    ob_bid_depth: float = 0.0
+    ob_ask_depth: float = 0.0
+
     def as_dict(self) -> dict[str, Any]:
         """Return all features as a flat dictionary."""
         return {
@@ -292,14 +297,42 @@ class FeatureCache:
         except Exception:
             fs.vwap = fs.close
 
+        # --- Order Book Imbalance (P1-9) ----------------------------
+        try:
+            from market_state import MarketState
+            order_book = getattr(MarketState, 'order_book', None)
+            if order_book and isinstance(order_book, dict):
+                bids = order_book.get("bids", [])
+                asks = order_book.get("asks", [])
+                top_n = 10
+                bid_depth = sum(
+                    float(lvl[1]) if isinstance(lvl, (list, tuple)) and len(lvl) >= 2
+                    else float(lvl.get("qty", 0) or lvl.get("size", 0) or lvl.get("quantity", 0))
+                    if isinstance(lvl, dict) else 0.0
+                    for lvl in bids[:top_n]
+                )
+                ask_depth = sum(
+                    float(lvl[1]) if isinstance(lvl, (list, tuple)) and len(lvl) >= 2
+                    else float(lvl.get("qty", 0) or lvl.get("size", 0) or lvl.get("quantity", 0))
+                    if isinstance(lvl, dict) else 0.0
+                    for lvl in asks[:top_n]
+                )
+                fs.ob_bid_depth = bid_depth
+                fs.ob_ask_depth = ask_depth
+                denom = bid_depth + ask_depth
+                if denom > 0:
+                    fs.ob_imbalance = (bid_depth - ask_depth) / denom
+        except Exception as ob_exc:
+            logger.debug("Order book imbalance error: {}", ob_exc)
+
         self._last_features = fs
 
         logger.debug(
             "FeatureCache computed | close={:.2f} EMA={}/{} RSI={:.1f} "
-            "ADX={:.1f} regime={} vol={}x BB_sq={} | ATR={:.2f} atr_ma50={:.2f} atr_ratio={:.2f}",
+            "ADX={:.1f} regime={} vol={}x BB_sq={} | ATR={:.2f} atr_ma50={:.2f} atr_ratio={:.2f} | ob_imb={:.3f}",
             fs.close, fs.ema_trend, round(fs.ema_fast - fs.ema_slow, 2),
             fs.rsi, fs.adx, fs.regime, fs.volume_ratio, fs.bb_squeeze,
-            fs.atr, fs.atr_ma50, fs.atr_ratio,
+            fs.atr, fs.atr_ma50, fs.atr_ratio, fs.ob_imbalance,
         )
         return fs
 
