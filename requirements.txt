@@ -1,4 +1,4 @@
-# Alpha-Scalp Bot — pinned for Python 3.11+
+# Alpha-Scalp Bot — pinned for Python 3.12+
 ccxt>=4.2.0
 pandas>=2.1.0
 pandas-ta>=0.3.14b
