@@ -1,16 +1,1 @@
-{
-  "default": {
-    "ema_cross":     1.4,
-    "rsi_zone":      1.2,
-    "macd_cross":    1.2,
-    "bb_bounce":     1.0,
-    "bb_squeeze":    1.3,
-    "vwap_cross":    1.1,
-    "obv_trend":     0.9,
-    "volume_spike":  1.0,
-    "swing_bias":    1.6,
-    "funding_bias":  0.8,
-    "mtf_bias":      1.5,
-    "ob_imbalance":  0.9
-  }
-}
+{"default": {"ema_cross":1.4,"rsi_zone":1.2,"macd_cross":1.2,"bb_bounce":1.0,"bb_squeeze":1.3,"vwap_cross":1.1,"obv_trend":0.9,"volume_spike":1.0,"swing_bias":1.6,"nw_signal":1.2,"adx_filter":1.0,"funding_bias":0.8,"mtf_bias":1.5,"ob_imbalance":1.1,"trade_aggression":1.3,"liquidity_wall":0.8,"liquidity_sweep":1.7}}
