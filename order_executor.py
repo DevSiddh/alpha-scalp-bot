@@ -62,6 +62,8 @@ class OrderExecutor:
     # P0-1: Position Reconcile on Restart
     # -------------------------------------------------------------------------
     async def reconcile_position(self, trade_tracker, telegram_alerts) -> bool:
+        if getattr(cfg, "PAPER_TRADING_MODE", False):
+            return False
         """On startup: check for open positions/orders and restore into TradeTrackerV2.
 
         Returns True if an open position was found and restored.
@@ -171,6 +173,9 @@ class OrderExecutor:
     def set_margin_type(self, symbol: str | None = None) -> bool:
         """Set ISOLATED margin mode for *symbol* on Binance Futures."""
         symbol = symbol or self.symbol
+        if getattr(cfg, "PAPER_TRADING_MODE", False):
+            logger.info("[PAPER TRADING] Simulated margin type ISOLATED for {}", symbol)
+            return True
         try:
             self.exchange.set_margin_mode("isolated", symbol)
             logger.info("Margin mode set to ISOLATED for {}", symbol)
@@ -190,6 +195,9 @@ class OrderExecutor:
         """Set leverage for *symbol* on Binance Futures."""
         symbol = symbol or self.symbol
         leverage = leverage or self.risk.get_effective_leverage()
+        if getattr(cfg, "PAPER_TRADING_MODE", False):
+            logger.info("[PAPER TRADING] Simulated leverage {}x for {}", leverage, symbol)
+            return True
         try:
             self.exchange.set_leverage(leverage, symbol)
             logger.info("Leverage set to {}x for {}", leverage, symbol)
@@ -281,6 +289,8 @@ class OrderExecutor:
         if not cfg.SPREAD_GUARD_ENABLED:
             return True, 0.0, {"skipped": True}
 
+        if getattr(cfg, "PAPER_TRADING_MODE", False):
+            return True, 0.0, {"skipped": True, "paper": True}
         try:
             book = self.exchange.fetch_order_book(
                 symbol, limit=cfg.SPREAD_GUARD_BOOK_DEPTH
@@ -361,6 +371,10 @@ class OrderExecutor:
         """
         sl_order = None
         tp_order = None
+        if getattr(cfg, "PAPER_TRADING_MODE", False):
+            import time
+            return {"id": f"paper_sl_{int(time.time()*1000)}"}, {"id": f"paper_tp_{int(time.time()*1000)}"}
+
 
         # --- Place SL ---
         try:
@@ -490,11 +504,25 @@ class OrderExecutor:
                 return None
 
             # ---- Step 1: Market entry ----
-            order = self.exchange.create_market_order(
-                symbol=symbol,
-                side=side.lower(),
-                amount=amount_float,
-            )
+            if getattr(cfg, "PAPER_TRADING_MODE", False):
+                import time
+                fill_price = expected_entry if expected_entry > 0 else 100.0
+                order = {
+                    "id": f"paper_{int(time.time()*1000)}",
+                    "symbol": symbol,
+                    "side": side.lower(),
+                    "amount": amount_float,
+                    "filled": amount_float,
+                    "average": fill_price,
+                    "price": fill_price,
+                    "status": "closed"
+                }
+            else:
+                order = self.exchange.create_market_order(
+                    symbol=symbol,
+                    side=side.lower(),
+                    amount=amount_float,
+                )
 
             order_id = order.get("id", "unknown")
             avg_price = order.get("average") or order.get("price", 0)
@@ -578,7 +606,10 @@ class OrderExecutor:
         """
         try:
             # Capture position info BEFORE closing
-            positions = self.exchange.fetch_positions([symbol])
+            if getattr(cfg, "PAPER_TRADING_MODE", False):
+                positions = [{"contracts": 1.0, "entryPrice": 100.0, "side": "long"}]
+            else:
+                positions = self.exchange.fetch_positions([symbol])
             target_pos = None
             for pos in positions:
                 contracts = float(pos.get("contracts", 0))
@@ -606,13 +637,22 @@ class OrderExecutor:
                 entry_price,
             )
 
-            order = self.exchange.create_order(
-                symbol=symbol,
-                type="market",
-                side=close_side,
-                amount=contracts,
-                params={"reduceOnly": True},
-            )
+            if getattr(cfg, "PAPER_TRADING_MODE", False):
+                import time
+                order = {
+                    "id": f"paper_close_{int(time.time()*1000)}",
+                    "filled": contracts,
+                    "average": entry_price,
+                    "price": entry_price,
+                }
+            else:
+                order = self.exchange.create_order(
+                    symbol=symbol,
+                    type="market",
+                    side=close_side,
+                    amount=contracts,
+                    params={"reduceOnly": True},
+                )
 
             exit_price = float(order.get("average") or order.get("price", 0))
 
@@ -642,6 +682,7 @@ class OrderExecutor:
     def get_position_info(self, symbol: str) -> dict[str, Any] | None:
         """Fetch current position info for a symbol. Returns None if no position."""
         try:
+            if getattr(cfg, "PAPER_TRADING_MODE", False): return None
             positions = self.exchange.fetch_positions([symbol])
             for pos in positions:
                 contracts = float(pos.get("contracts", 0))
@@ -664,6 +705,7 @@ class OrderExecutor:
     def get_open_positions(self, symbol: str) -> list[dict[str, Any]]:
         """Return a list of open positions for *symbol*."""
         try:
+            if getattr(cfg, "PAPER_TRADING_MODE", False): return []
             positions = self.exchange.fetch_positions([symbol])
             open_positions = [
                 {
@@ -693,6 +735,8 @@ class OrderExecutor:
     # Cancel All Orders
     # -----------------------------------------------------------------
     def cancel_all_orders(self, symbol: str) -> int:
+        if getattr(cfg, "PAPER_TRADING_MODE", False):
+            return 0
         """Cancel every pending (open) order for *symbol*."""
         try:
             open_orders = self.exchange.fetch_open_orders(symbol)

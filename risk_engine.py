@@ -104,6 +104,12 @@ class RiskEngine:
     # Balance helpers (with cache)
     # -----------------------------------------------------------------
     def _fetch_usdt_balance(self) -> float:
+        if getattr(cfg, "PAPER_TRADING_MODE", False):
+            import time
+            bal = getattr(cfg, "INITIAL_BALANCE", 10000.0) + self.daily_realized_pnl
+            self._cached_balance = bal
+            self._cache_timestamp = time.monotonic()
+            return bal
         try:
             bal = self.exchange.fetch_balance({"type": "future"})
             total = float(bal.get("total", {}).get("USDT", 0.0))
@@ -250,6 +256,7 @@ class RiskEngine:
         """Return True if total open positions (scalp + swing) are below global cap."""
         try:
             # Fetch all positions for all symbols we trade
+            if getattr(cfg, "PAPER_TRADING_MODE", False): return True
             all_symbols = [self.symbol]
             if getattr(cfg, 'SWING_ENABLED', False):
                 all_symbols.extend(cfg.SWING_SYMBOLS)
@@ -605,6 +612,7 @@ class RiskEngine:
 
     def check_swing_total_exposure(self) -> bool:
         try:
+            if getattr(cfg, "PAPER_TRADING_MODE", False): return True
             equity = self.get_cached_balance()
             positions = self.exchange.fetch_positions(cfg.SWING_SYMBOLS)
             total_notional = sum(
@@ -636,6 +644,7 @@ class RiskEngine:
 
     def check_swing_max_positions(self, symbols: list[str]) -> bool:
         try:
+            if getattr(cfg, "PAPER_TRADING_MODE", False): return True
             positions = self.exchange.fetch_positions(symbols)
             open_count = sum(1 for p in positions if float(p.get("contracts", 0)) > 0)
             under_limit = open_count < cfg.SWING_MAX_OPEN_POSITIONS
@@ -649,6 +658,7 @@ class RiskEngine:
 
     def check_swing_symbol_position(self, symbol: str) -> bool:
         try:
+            if getattr(cfg, "PAPER_TRADING_MODE", False): return False
             positions = self.exchange.fetch_positions([symbol])
             for p in positions:
                 if float(p.get("contracts", 0)) > 0:
@@ -663,6 +673,7 @@ class RiskEngine:
     # -----------------------------------------------------------------
     def check_max_positions(self) -> bool:
         try:
+            if getattr(cfg, "PAPER_TRADING_MODE", False): return True
             positions = self.exchange.fetch_positions([self.symbol])
             open_count = sum(1 for p in positions if float(p.get("contracts", 0)) > 0)
             under_limit = open_count < self.max_positions
