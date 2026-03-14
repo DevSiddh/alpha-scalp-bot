@@ -117,6 +117,7 @@ _funding_cache = FundingRateCache()
 class AlphaEngine:
     def __init__(self):
         self.http_client: Optional[httpx.AsyncClient] = None
+        self._sweep_cooldown = 0
     
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         cached = _funding_cache.get(symbol)
@@ -151,6 +152,8 @@ class AlphaEngine:
         swing_vote: Optional[Vote] = None,
         mtf_vote: Optional[Vote] = None,
     ) -> AlphaVotes:
+        if getattr(self, "_sweep_cooldown", 0) > 0:
+            self._sweep_cooldown -= 1
         votes = AlphaVotes()
         
         # Features mapping fallback mapping
@@ -233,9 +236,17 @@ class AlphaEngine:
 
         # S15: Liquidity Sweep
         if getattr(features, 'liquidity_sweep_bull', False):
-            votes.liquidity_sweep = Vote("BUY", 0.85, "Bullish liquidity sweep (TP/SL override)")
+            if getattr(self, "_sweep_cooldown", 0) > 0:
+                votes.liquidity_sweep = Vote("HOLD", 0.0, "Sweep cooldown")
+            else:
+                votes.liquidity_sweep = Vote("BUY", 0.85, "Bullish liquidity sweep (TP/SL override)")
+                self._sweep_cooldown = 2
         elif getattr(features, 'liquidity_sweep_bear', False):
-            votes.liquidity_sweep = Vote("SELL", 0.85, "Bearish liquidity sweep (TP/SL override)")
+            if getattr(self, "_sweep_cooldown", 0) > 0:
+                votes.liquidity_sweep = Vote("HOLD", 0.0, "Sweep cooldown")
+            else:
+                votes.liquidity_sweep = Vote("SELL", 0.85, "Bearish liquidity sweep (TP/SL override)")
+                self._sweep_cooldown = 2
             
         return votes
 
