@@ -1,346 +1,382 @@
-"""Alpha-Scalp Bot – Alpha Engine Module (Phase 1).
+"""Alpha-Scalp Bot – Alpha Engine Module.
 
-Converts raw feature values into small directional "votes" ranging from
--2 (strong short) to +2 (strong long).  Each signal function reads from
-the FeatureSet (computed once by FeatureCache) and returns a vote.
+Multi-signal voting system that generates independent BUY/SELL/HOLD votes
+for each signal source. Each vote includes direction, strength (0-1), and
+a human-readable reason.
 
-The votes are later aggregated by SignalScoring into a single weighted
-score that determines whether to trade and at what confidence.
-
-Signal Votes:
-    +2  strong long   (e.g. RSI < 25, very oversold)
-    +1  mild long     (e.g. RSI 25-35, somewhat oversold)
-     0  neutral       (no edge)
-    -1  mild short    (e.g. RSI 65-75, somewhat overbought)
-    -2  strong short  (e.g. RSI > 75, very overbought)
+Signals:
+- ema_cross: EMA fast/slow crossover
+- rsi_zone: RSI oversold/overbought zones
+- macd_cross: MACD line/signal crossover
+- bb_bounce: Bollinger Band mean reversion
+- bb_squeeze: Bollinger squeeze breakout
+- vwap_cross: VWAP crossover
+- obv_trend: OBV trend direction
+- volume_spike: Volume spike confirmation
+- swing_bias: 4h swing strategy bias
+- funding_bias: Funding rate sentiment (P1-7)
+- mtf_bias: 15m MTF confirmation (P1-8)
 """
 
 from __future__ import annotations
 
 import time
-
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Optional
 
+import httpx
 from loguru import logger
 
-import config as cfg
-from feature_cache import FeatureSet
+# config imported but not used in this module - kept for potential future use
+# import config as cfg
 
+
+# =============================================================================
+# Vote Dataclass
+# =============================================================================
+
+@dataclass
+class Vote:
+    """Single signal vote with direction, strength, and reason.
+    
+    Attributes:
+        direction: "BUY" | "SELL" | "HOLD"
+        strength: 0.0 to 1.0 (confidence in this vote)
+        reason: Human-readable explanation
+    """
+    direction: str
+    strength: float
+    reason: str
+    
+    def __post_init__(self):
+        if self.direction not in ("BUY", "SELL", "HOLD"):
+            raise ValueError(f"Invalid direction: {self.direction}")
+        if not 0.0 <= self.strength <= 1.0:
+            raise ValueError(f"Strength must be 0-1: {self.strength}")
+    
+    def to_score(self) -> int:
+        """Convert to numeric score for aggregation.
+        
+        Returns:
+            +1 for BUY, -1 for SELL, 0 for HOLD
+        """
+        return {"BUY": 1, "SELL": -1, "HOLD": 0}[self.direction]
+
+
+# =============================================================================
+# AlphaVotes Container
+# =============================================================================
 
 @dataclass
 class AlphaVotes:
-    """Container for all alpha signal votes."""
-
-    ema_cross: int = 0       # EMA crossover direction
-    ema_trend: int = 0       # EMA trend alignment
-    rsi: int = 0             # RSI momentum
-    nw_envelope: int = 0     # Nadaraya-Watson mean reversion
-    volume: int = 0          # Volume confirmation
-    bb_squeeze: int = 0      # Bollinger Band squeeze breakout
-    adx_regime: int = 0      # ADX trend strength
-    cvd: int = 0              # Cumulative Volume Delta pressure
-    funding_bias: int = 0    # Funding rate bias (P1-7)
-    mtf_bias: int = 0        # 15m MTF confirmation (P1-8)
-    ob_imbalance: int = 0    # Order book imbalance (P2-13)
-
+    """Container for all signal votes.
+    
+    Each signal independently votes BUY/SELL/HOLD with strength 0-1.
+    Votes are aggregated by SignalScoring with regime-specific weights.
+    """
+    ema_cross: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "No EMA cross"))
+    rsi_zone: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "RSI neutral"))
+    macd_cross: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "No MACD cross"))
+    bb_bounce: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "No BB bounce"))
+    bb_squeeze: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "No BB squeeze"))
+    vwap_cross: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "No VWAP cross"))
+    obv_trend: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "OBV neutral"))
+    volume_spike: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "No volume spike"))
+    swing_bias: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "Swing neutral"))
+    funding_bias: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "Funding neutral"))
+    mtf_bias: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "MTF neutral"))
+    
     def as_dict(self) -> dict[str, int]:
-        """Return all votes as a dictionary."""
+        """Convert votes to dictionary of numeric scores.
+        
+        Returns:
+            Dict mapping signal name to score (+1/-1/0)
+        """
         return {
-            k: getattr(self, k)
-            for k in self.__dataclass_fields__
+            "ema_cross": self.ema_cross.to_score(),
+            "rsi_zone": self.rsi_zone.to_score(),
+            "macd_cross": self.macd_cross.to_score(),
+            "bb_bounce": self.bb_bounce.to_score(),
+            "bb_squeeze": self.bb_squeeze.to_score(),
+            "vwap_cross": self.vwap_cross.to_score(),
+            "obv_trend": self.obv_trend.to_score(),
+            "volume_spike": self.volume_spike.to_score(),
+            "swing_bias": self.swing_bias.to_score(),
+            "funding_bias": self.funding_bias.to_score(),
+            "mtf_bias": self.mtf_bias.to_score(),
+        }
+    
+    def get_all_votes(self) -> dict[str, Vote]:
+        """Get all votes as Vote objects.
+        
+        Returns:
+            Dict mapping signal name to Vote object
+        """
+        return {
+            "ema_cross": self.ema_cross,
+            "rsi_zone": self.rsi_zone,
+            "macd_cross": self.macd_cross,
+            "bb_bounce": self.bb_bounce,
+            "bb_squeeze": self.bb_squeeze,
+            "vwap_cross": self.vwap_cross,
+            "obv_trend": self.obv_trend,
+            "volume_spike": self.volume_spike,
+            "swing_bias": self.swing_bias,
+            "funding_bias": self.funding_bias,
+            "mtf_bias": self.mtf_bias,
         }
 
-    def total(self) -> int:
-        """Sum of all raw votes (unweighted)."""
-        return sum(self.as_dict().values())
 
-    @property
-    def signal_names(self) -> list[str]:
-        """Names of all signals that contributed a non-zero vote."""
-        return [k for k, v in self.as_dict().items() if v != 0]
+# =============================================================================
+# Funding Rate Cache (P1-7)
+# =============================================================================
 
+class FundingRateCache:
+    """In-memory cache for funding rate data.
+    
+    Caches funding rate for 8 hours to avoid API spam.
+    Uses Binance premiumIndex endpoint.
+    """
+    
+    def __init__(self, ttl_seconds: int = 8 * 60 * 60):
+        self._cache: dict[str, dict] = {}
+        self._ttl = ttl_seconds
+    
+    def get(self, symbol: str) -> Optional[float]:
+        """Get cached funding rate if not expired.
+        
+        Args:
+            symbol: Trading pair (e.g., "BTCUSDT")
+            
+        Returns:
+            Funding rate or None if expired/missing
+        """
+        entry = self._cache.get(symbol)
+        if entry is None:
+            return None
+        
+        if time.time() - entry["timestamp"] > self._ttl:
+            del self._cache[symbol]
+            return None
+        
+        return entry["rate"]
+    
+    def set(self, symbol: str, rate: float) -> None:
+        """Cache funding rate with current timestamp.
+        
+        Args:
+            symbol: Trading pair
+            rate: Funding rate value
+        """
+        self._cache[symbol] = {
+            "rate": rate,
+            "timestamp": time.time()
+        }
+        logger.debug("Cached funding rate for {}: {}", symbol, rate)
+
+
+# Global funding rate cache instance
+_funding_cache = FundingRateCache()
+
+
+# =============================================================================
+# Alpha Engine
+# =============================================================================
 
 class AlphaEngine:
-    """Convert FeatureSet values into directional votes (-2 to +2).
-
-    Each method below is a self-contained signal that reads from the
-    cached FeatureSet and returns a vote.  New signals can be added
-    by simply writing a new ``_vote_xxx`` method and including it
-    in ``generate_votes()``.
+    """Multi-signal voting engine.
+    
+    Generates independent votes from multiple signal sources.
+    Each signal votes BUY/SELL/HOLD with strength 0-1.
     """
-
-    _funding_cache: dict = {}  # {"rate": float, "ts": float}  — P1-7
-
-    def __init__(self) -> None:
-        logger.info("AlphaEngine initialised (8 signal voters)")
-
-    # ------------------------------------------------------------------
-    # Individual signal voters
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _vote_ema_cross(fs: FeatureSet) -> int:
-        """EMA crossover: +2 cross up, -2 cross down, else 0."""
-        if fs.ema_cross_up:
-            return +2
-        if fs.ema_cross_down:
-            return -2
-        return 0
-
-    @staticmethod
-    def _vote_ema_trend(fs: FeatureSet) -> int:
-        """EMA trend alignment: +1 bullish, -1 bearish.
-
-        Not as strong as a fresh cross, but confirms direction.
+    
+    def __init__(self):
+        self.http_client: Optional[httpx.AsyncClient] = None
+    
+    async def get_funding_rate(self, symbol: str) -> Optional[float]:
+        """Fetch funding rate from Binance.
+        
+        Uses Binance premiumIndex endpoint:
+        GET /fapi/v1/premiumIndex?symbol={SYMBOL}
+        
+        Args:
+            symbol: Trading pair (e.g., "BTCUSDT")
+            
+        Returns:
+            Funding rate or None on error
         """
-        return fs.ema_trend  # already +1, 0, or -1
-
-    @staticmethod
-    def _vote_rsi(fs: FeatureSet) -> int:
-        """RSI momentum vote.
-
-        Zones:
-            RSI < 25       → +2 (deeply oversold, strong long)
-            RSI 25-35      → +1 (oversold, mild long)
-            RSI 35-65      →  0 (neutral)
-            RSI 65-75      → -1 (overbought, mild short)
-            RSI > 75       → -2 (deeply overbought, strong short)
-        """
-        rsi = fs.rsi
-        if rsi < 25:
-            return +2
-        if rsi < 35:
-            return +1
-        if rsi > 75:
-            return -2
-        if rsi > 65:
-            return -1
-        return 0
-
-    @staticmethod
-    def _vote_nw_envelope(fs: FeatureSet) -> int:
-        """Nadaraya-Watson envelope mean-reversion vote.
-
-        Price crossing below lower band = mean reversion long (+2)
-        Price crossing above upper band = mean reversion short (-2)
-        Price near lower band (within 0.3%) = mild long (+1)
-        Price near upper band (within 0.3%) = mild short (-1)
-        """
-        if fs.nw_long_cross:
-            return +2
-        if fs.nw_short_cross:
-            return -2
-
-        # Near-band proximity (within 0.3% of band)
-        band_range = fs.nw_upper - fs.nw_lower
-        if band_range > 0:
-            lower_dist = (fs.close - fs.nw_lower) / band_range
-            upper_dist = (fs.nw_upper - fs.close) / band_range
-            if lower_dist < 0.1:  # within 10% of band range from lower
-                return +1
-            if upper_dist < 0.1:  # within 10% of band range from upper
-                return -1
-        return 0
-
-    @staticmethod
-    def _vote_volume(fs: FeatureSet) -> int:
-        """Volume confirmation vote.
-
-        Volume spike (>1.5x) confirms the current direction.
-        Without volume, the signal is weaker (0).
-
-        2x+ avg  → +2 (strong confirmation in EMA direction)
-        1.5-2x   → +1 (moderate confirmation)
-        < 1.5x   →  0 (no volume edge)
-        """
-        if not fs.volume_spike:
-            return 0
-        # Volume confirms direction — sign comes from EMA trend
-        direction = fs.ema_trend if fs.ema_trend != 0 else (1 if fs.rsi < 50 else -1)
-        if fs.volume_ratio >= 2.0:
-            return +2 * direction
-        return +1 * direction
-
-    @staticmethod
-    def _vote_bb_squeeze(fs: FeatureSet) -> int:
-        """Bollinger Band squeeze vote.
-
-        Squeeze = low volatility compression → breakout imminent.
-        Direction comes from EMA trend.
-
-        Squeeze active → +1 in EMA direction (breakout anticipated)
-        No squeeze     →  0
-        """
-        if not fs.bb_squeeze:
-            return 0
-        direction = fs.ema_trend if fs.ema_trend != 0 else 0
-        return +1 * direction
-
-    @staticmethod
-    def _vote_adx_regime(fs: FeatureSet) -> int:
-        """ADX regime vote.
-
-        Strong trend (ADX > 40) → +1 in EMA direction (ride the trend)
-        Trending (25-40)        →  0 (neutral, trend exists but not extreme)
-        Ranging (< 25)          → invert EMA direction by +1 (mean reversion)
-        """
-        if fs.regime == "VOLATILE":
-            # Strong trend — go with the trend
-            return +1 * fs.ema_trend
-        if fs.regime == "RANGING":
-            # Mean reversion — fade the trend
-            return -1 * fs.ema_trend
-        return 0  # TRENDING = neutral boost
-
-    @staticmethod
-    def _vote_cvd(fs: FeatureSet) -> int:
-        """Cumulative Volume Delta vote.
-
-        CVD measures net buying vs selling pressure.  Uses three sub-signals:
-
-        1. CVD slope (momentum of order flow):
-           slope > +strong_threshold  → +2 (aggressive buying)
-           slope > +mild_threshold    → +1 (mild buying)
-           slope < -strong_threshold  → -2 (aggressive selling)
-           slope < -mild_threshold    → -1 (mild selling)
-
-        2. CVD divergence (bonus):
-           Price falling + CVD rising  → +1 (hidden bullish pressure)
-           Price rising  + CVD falling → -1 (hidden bearish pressure)
-
-        The two sub-signals are summed and clamped to [-2, +2].
-        """
-        if not getattr(cfg, "CVD_ENABLED", False):
-            return 0
-
-        strong = getattr(cfg, "CVD_STRONG_THRESHOLD", 0.6)
-        mild = getattr(cfg, "CVD_MILD_THRESHOLD", 0.3)
-        slope = fs.cvd_slope
-
-        # Sub-signal 1: slope direction
-        vote = 0
-        if slope >= strong:
-            vote = +2
-        elif slope >= mild:
-            vote = +1
-        elif slope <= -strong:
-            vote = -2
-        elif slope <= -mild:
-            vote = -1
-
-        # Sub-signal 2: divergence bonus
-        vote += fs.cvd_divergence  # +1, 0, or -1
-
-        # Clamp to [-2, +2]
-        return max(-2, min(+2, vote))
-
-    def _get_funding_rate(self) -> float:
-        """Fetch and cache Binance futures funding rate (8h cache)."""
-        now = time.time()
-        cache_ttl = getattr(cfg, 'FUNDING_RATE_CACHE_SECONDS', 28800)
-        if self._funding_cache and (now - self._funding_cache.get("ts", 0)) < cache_ttl:
-            return self._funding_cache["rate"]
+        # Check cache first
+        cached = _funding_cache.get(symbol)
+        if cached is not None:
+            logger.debug("Using cached funding rate for {}: {}", symbol, cached)
+            return cached
+        
         try:
-            symbol_raw = cfg.SYMBOL.replace("/", "")
-            url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol_raw}&limit=1"
-            import urllib.request, json as _json
-            with urllib.request.urlopen(url, timeout=5) as resp:
-                data = _json.loads(resp.read())
-            rate = float(data[0]["fundingRate"]) if data else 0.0
-            self._funding_cache = {"rate": rate, "ts": now}
-            logger.debug("funding_rate fetched: {:.6f}", rate)
+            binance_symbol = symbol.replace("/", "").replace("_", "")
+            url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={binance_symbol}"
+            
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+            
+            rate = float(data.get("lastFundingRate", 0))
+            _funding_cache.set(symbol, rate)
+            
+            logger.info("Fetched funding rate for {}: {}", symbol, rate)
             return rate
-        except Exception as exc:
-            logger.warning("funding_rate fetch failed: {} — using 0.0", exc)
-            return self._funding_cache.get("rate", 0.0)
-
-    def _vote_funding_bias(self, fs: "FeatureSet") -> int:
-        """Funding rate bias vote (P1-7). Returns -1, 0, or +1 mapped to strength."""
-        threshold = getattr(cfg, 'FUNDING_RATE_THRESHOLD', 0.0005)
-        rate = self._get_funding_rate()
-        if rate < -threshold:
-            return 1   # negative funding -> longs pay less -> BUY bias
-        if rate > threshold:
-            return -1  # positive funding -> shorts pay less -> SELL bias
-        return 0
-
-    @staticmethod
-    def _vote_ob_imbalance(fs: "FeatureSet") -> int:
-        """Order book imbalance vote (P2-13).
-
-        Uses top-10 bid/ask quantities already collected by MarketState.
-
-        bid_ratio = bid_vol / (bid_vol + ask_vol)
-        bid_ratio > 0.65  → BUY  (+1)
-        bid_ratio < 0.35  → SELL (-1)
-        else              → HOLD  (0)
-
-        Weight: ob_imbalance = 0.9 (see weights.json)
-        Wrapped entirely in try/except — depth data may be empty on WS reconnect.
+            
+        except Exception as e:
+            logger.warning("Failed to fetch funding rate for {}: {}", symbol, e)
+            return None
+    
+    def generate_funding_bias_vote(self, rate: Optional[float]) -> Vote:
+        """Generate funding bias vote based on funding rate.
+        
+        Voting logic:
+        - rate < -0.0005 -> Vote("BUY", strength=0.3, "Negative funding, shorts crowded")
+        - rate > 0.0005 -> Vote("SELL", strength=0.3, "High funding, longs crowded")
+        - else -> Vote("HOLD", strength=0.0, "Neutral funding")
+        
+        Args:
+            rate: Funding rate value
+            
+        Returns:
+            Vote object with direction, strength, reason
         """
-        try:
-            bids = getattr(fs, "ob_bids", None)  # list of [price, qty] top-10
-            asks = getattr(fs, "ob_asks", None)
-
-            if not bids or not asks:
-                return 0
-
-            bid_vol = sum(float(b[1]) for b in bids[:10])
-            ask_vol = sum(float(a[1]) for a in asks[:10])
-            total = bid_vol + ask_vol
-
-            if total <= 0:
-                return 0
-
-            bid_ratio = bid_vol / total
-
-            if bid_ratio > 0.65:
-                return +1   # strong buy-side pressure
-            if bid_ratio < 0.35:
-                return -1   # strong sell-side pressure
-            return 0
-
-        except Exception:
-            return 0
-
-    # ------------------------------------------------------------------
-    # Main vote generator
-    # ------------------------------------------------------------------
-
-    def generate_votes(self, fs: FeatureSet, swing_strategy=None, exchange=None) -> AlphaVotes:
-        """Run all signal voters against the current FeatureSet.
-
-        Parameters
-        ----------
-        fs : FeatureSet
-            The cached feature snapshot for the current bar.
-
-        Returns
-        -------
-        AlphaVotes
-            Container with each signal's vote.
+        if rate is None:
+            return Vote("HOLD", 0.0, "Funding rate unavailable")
+        
+        if rate <= -0.0005:
+            return Vote(
+                "BUY",
+                strength=0.3,
+                reason="Negative funding, shorts crowded"
+            )
+        elif rate >= 0.0005:
+            return Vote(
+                "SELL",
+                strength=0.3,
+                reason="High funding, longs crowded"
+            )
+        else:
+            return Vote("HOLD", strength=0.0, reason="Neutral funding")
+    
+    def generate_votes(
+        self,
+        features: "FeatureSet",
+        funding_rate: Optional[float] = None,
+        swing_vote: Optional[Vote] = None,
+        mtf_vote: Optional[Vote] = None,
+    ) -> AlphaVotes:
+        """Generate all signal votes.
+        
+        Args:
+            features: FeatureSet with all computed indicators
+            funding_rate: Optional pre-fetched funding rate
+            swing_vote: Optional vote from swing strategy (4h bias)
+            mtf_vote: Optional vote from MTF strategy (15m confirmation)
+            
+        Returns:
+            AlphaVotes container with all signal votes
         """
-        votes = AlphaVotes(
-            ema_cross=self._vote_ema_cross(fs),
-            ema_trend=self._vote_ema_trend(fs),
-            rsi=self._vote_rsi(fs),
-            nw_envelope=self._vote_nw_envelope(fs),
-            volume=self._vote_volume(fs),
-            bb_squeeze=self._vote_bb_squeeze(fs),
-            adx_regime=self._vote_adx_regime(fs),
-            cvd=self._vote_cvd(fs),
-            funding_bias=self._vote_funding_bias(fs),
-            ob_imbalance=self._vote_ob_imbalance(fs),
-        )
-
-        # P1-8: MTF bias from swing strategy
-        if swing_strategy is not None and exchange is not None:
-            votes.mtf_bias = swing_strategy.get_mtf_bias(exchange)
-
-        logger.debug(
-            "AlphaEngine votes | total={:+d} | {}",
-            votes.total(),
-            " ".join(f"{k}={v:+d}" for k, v in votes.as_dict().items() if v != 0),
-        )
+        votes = AlphaVotes()
+        
+        # ===== Core Signals =====
+        
+        # EMA Cross
+        if hasattr(features, 'ema_fast') and hasattr(features, 'ema_slow'):
+            if features.ema_fast > features.ema_slow * 1.001:
+                votes.ema_cross = Vote("BUY", 0.8, "EMA bullish cross")
+            elif features.ema_fast < features.ema_slow * 0.999:
+                votes.ema_cross = Vote("SELL", 0.8, "EMA bearish cross")
+        
+        # RSI Zone
+        if hasattr(features, 'rsi'):
+            if features.rsi < 35:
+                votes.rsi_zone = Vote("BUY", 0.7, "RSI oversold")
+            elif features.rsi > 65:
+                votes.rsi_zone = Vote("SELL", 0.7, "RSI overbought")
+        
+        # MACD Cross
+        if hasattr(features, 'macd') and hasattr(features, 'macd_signal'):
+            if features.macd > features.macd_signal * 1.01:
+                votes.macd_cross = Vote("BUY", 0.6, "MACD bullish")
+            elif features.macd < features.macd_signal * 0.99:
+                votes.macd_cross = Vote("SELL", 0.6, "MACD bearish")
+        
+        # BB Bounce
+        if hasattr(features, 'bb_lower') and hasattr(features, 'bb_upper'):
+            price = getattr(features, 'close', 0)
+            if price < features.bb_lower:
+                votes.bb_bounce = Vote("BUY", 0.6, "Price below BB lower")
+            elif price > features.bb_upper:
+                votes.bb_bounce = Vote("SELL", 0.6, "Price above BB upper")
+        
+        # BB Squeeze
+        if hasattr(features, 'bb_squeeze') and features.bb_squeeze:
+            votes.bb_squeeze = Vote("BUY", 0.5, "BB squeeze detected")
+        
+        # VWAP Cross
+        if hasattr(features, 'vwap'):
+            price = getattr(features, 'close', 0)
+            if price > features.vwap * 1.001:
+                votes.vwap_cross = Vote("BUY", 0.5, "Price above VWAP")
+            elif price < features.vwap * 0.999:
+                votes.vwap_cross = Vote("SELL", 0.5, "Price below VWAP")
+        
+        # OBV Trend
+        if hasattr(features, 'obv_slope'):
+            if features.obv_slope > 0:
+                votes.obv_trend = Vote("BUY", 0.5, "OBV uptrend")
+            elif features.obv_slope < 0:
+                votes.obv_trend = Vote("SELL", 0.5, "OBV downtrend")
+        
+        # Volume Spike
+        if hasattr(features, 'volume_ratio'):
+            if features.volume_ratio > 2.0:
+                votes.volume_spike = Vote("BUY", 0.4, "Volume spike confirmation")
+        
+        # ===== Bias Signals =====
+        
+        # Swing Bias (4h)
+        if swing_vote is not None:
+            votes.swing_bias = swing_vote
+        
+        # Funding Bias (P1-7)
+        if funding_rate is not None:
+            votes.funding_bias = self.generate_funding_bias_vote(funding_rate)
+        
+        # MTF Bias (15m, P1-8)
+        if mtf_vote is not None:
+            votes.mtf_bias = mtf_vote
+        
         return votes
+    
+    async def generate_votes_with_funding(
+        self,
+        features: "FeatureSet",
+        symbol: str,
+        swing_vote: Optional[Vote] = None,
+        mtf_vote: Optional[Vote] = None,
+    ) -> AlphaVotes:
+        """Generate votes with automatic funding rate fetch.
+        
+        Convenience method that fetches funding rate and generates all votes.
+        
+        Args:
+            features: FeatureSet with indicators
+            symbol: Trading pair
+            swing_vote: Optional swing strategy vote
+            mtf_vote: Optional MTF vote
+            
+        Returns:
+            AlphaVotes with all signals including funding
+        """
+        funding_rate = await self.get_funding_rate(symbol)
+        return self.generate_votes(
+            features=features,
+            funding_rate=funding_rate,
+            swing_vote=swing_vote,
+            mtf_vote=mtf_vote,
+        )
