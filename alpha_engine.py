@@ -16,6 +16,7 @@ Signals:
 - swing_bias: 4h swing strategy bias
 - funding_bias: Funding rate sentiment (P1-7)
 - mtf_bias: 15m MTF confirmation (P1-8)
+- ob_imbalance: Order book imbalance pressure (P1-9)
 """
 
 from __future__ import annotations
@@ -85,6 +86,7 @@ class AlphaVotes:
     swing_bias: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "Swing neutral"))
     funding_bias: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "Funding neutral"))
     mtf_bias: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "MTF neutral"))
+    ob_imbalance: Vote = field(default_factory=lambda: Vote("HOLD", 0.0, "Order book neutral"))
     
     def as_dict(self) -> dict[str, int]:
         """Convert votes to dictionary of numeric scores.
@@ -104,6 +106,7 @@ class AlphaVotes:
             "swing_bias": self.swing_bias.to_score(),
             "funding_bias": self.funding_bias.to_score(),
             "mtf_bias": self.mtf_bias.to_score(),
+            "ob_imbalance": self.ob_imbalance.to_score(),
         }
     
     def get_all_votes(self) -> dict[str, Vote]:
@@ -124,6 +127,7 @@ class AlphaVotes:
             "swing_bias": self.swing_bias,
             "funding_bias": self.funding_bias,
             "mtf_bias": self.mtf_bias,
+            "ob_imbalance": self.ob_imbalance,
         }
 
 
@@ -351,6 +355,15 @@ class AlphaEngine:
         if mtf_vote is not None:
             votes.mtf_bias = mtf_vote
         
+        # Order Book Imbalance (P1-9)
+        ob = getattr(features, 'ob_imbalance', 0.0)
+        if ob > 0.3:
+            votes.ob_imbalance = Vote("BUY", 0.6, "Order book bid-heavy, buying pressure")
+        elif ob < -0.3:
+            votes.ob_imbalance = Vote("SELL", 0.6, "Order book ask-heavy, selling pressure")
+        else:
+            votes.ob_imbalance = Vote("HOLD", 0.0, "Order book neutral")
+
         return votes
     
     async def generate_votes_with_funding(
