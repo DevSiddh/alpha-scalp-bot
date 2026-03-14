@@ -1,0 +1,16 @@
+{
+  "default": {
+    "ema_cross": 1.4,
+    "rsi_zone": 1.2,
+    "macd_cross": 1.2,
+    "bb_bounce": 1.0,
+    "bb_squeeze": 1.3,
+    "vwap_cross": 1.1,
+    "obv_trend": 0.9,
+    "volume_spike": 1.0,
+    "swing_bias": 2.0,
+    "funding_bias": 1.1,
+    "mtf_bias": 1.6,
+    "ob_imbalance": 0.9
+  }
+}
