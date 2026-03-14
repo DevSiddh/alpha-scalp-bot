@@ -314,3 +314,10 @@ DISABLED_SIGNALS_BY_REGIME: dict[str, list[str]] = {
 # ===== Funding Rate Signal ====================================================
 FUNDING_RATE_CACHE_SECONDS: int = _env("FUNDING_RATE_CACHE_SECONDS", "28800", cast=int)  # 8 hours
 FUNDING_RATE_THRESHOLD: float = _env("FUNDING_RATE_THRESHOLD", "0.0005", cast=float)
+
+# New variables Added
+MAX_SPREAD_BPS = int(os.getenv("MAX_SPREAD_BPS", "20"))
+DATA_FRESHNESS_SECONDS = int(os.getenv("DATA_FRESHNESS_SECONDS", "5"))
+MIN_POSITION_SIZE_USDT = float(os.getenv("MIN_POSITION_SIZE_USDT", "6"))
+MAX_POSITION_SIZE_USDT = float(os.getenv("MAX_POSITION_SIZE_USDT", "15"))
+CONSENSUS_THRESHOLD = float(os.getenv("CONSENSUS_THRESHOLD", "0.65"))

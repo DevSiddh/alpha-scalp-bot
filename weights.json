@@ -8,9 +8,9 @@
     "vwap_cross":    1.1,
     "obv_trend":     0.9,
     "volume_spike":  1.0,
-    "swing_bias":    2.0,
-    "funding_bias":  1.1,
-    "mtf_bias":      1.6,
+    "swing_bias":    1.6,
+    "funding_bias":  0.8,
+    "mtf_bias":      1.5,
     "ob_imbalance":  0.9
   }
 }

@@ -676,6 +676,28 @@ class RiskEngine:
     # -----------------------------------------------------------------
     # PREMIUM: Pre-trade gate (all checks combined)
     # -----------------------------------------------------------------
+    def sanity_guard(self, entry: float, vwap: float, ask: float, bid: float, last_trade_time: float, requested_size: float) -> tuple[bool, str, float]:
+        if vwap > 0 and abs(entry - vwap) / vwap > 0.01:
+            return False, "vwap_deviation_too_high", requested_size
+        mid = (ask + bid) / 2
+        if mid > 0 and (ask - bid) / mid > getattr(cfg, 'MAX_SPREAD_BPS', 20) / 10000.0:
+            return False, "spread_too_wide", requested_size
+        if time.time() - last_trade_time > getattr(cfg, 'DATA_FRESHNESS_SECONDS', 5):
+            return False, "stale_data", requested_size
+        
+        # Clamp size
+        notional = requested_size * entry
+        min_pos = getattr(cfg, 'MIN_POSITION_SIZE_USDT', 6)
+        max_pos = getattr(cfg, 'MAX_POSITION_SIZE_USDT', 15)
+        
+        if notional < min_pos:
+            notional = min_pos
+        elif notional > max_pos:
+            notional = max_pos
+            
+        clamped_size = notional / entry
+        return True, "ok", clamped_size
+
     def can_open_trade(self) -> tuple[bool, str]:
         """Run ALL premium risk checks before opening a new trade.
 

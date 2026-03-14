@@ -211,24 +211,10 @@ class SignalScoring:
         ScoringResult
             Full scoring output with breakdown.
         """
-        # P1-3: Volatility filter check
+        atr_ratio = features.atr / features.atr_ma50 if features.atr_ma50 > 0 else 1.0
+        if atr_ratio > cfg.ATR_RATIO_MAX or atr_ratio < cfg.ATR_RATIO_MIN:
+            return ScoringResult(action="HOLD", volatility_filter_triggered=True, regime=features.regime)
         volatility_filter_triggered = False
-        atr_ratio_max = getattr(cfg, 'ATR_RATIO_MAX', 2.5)
-        atr_ratio_min = getattr(cfg, 'ATR_RATIO_MIN', 0.5)
-        atr_ratio = getattr(features, 'atr_ratio', 1.0)
-
-        if atr_ratio > atr_ratio_max:
-            volatility_filter_triggered = True
-            logger.info(
-                "VOLATILITY FILTER | atr_ratio={:.2f} > MAX={:.2f} | HOLD",
-                atr_ratio, atr_ratio_max
-            )
-        elif atr_ratio < atr_ratio_min:
-            volatility_filter_triggered = True
-            logger.info(
-                "VOLATILITY FILTER | atr_ratio={:.2f} < MIN={:.2f} | HOLD",
-                atr_ratio, atr_ratio_min
-            )
 
         regime = features.regime
         weights = self.get_weights_for_regime(regime)
@@ -241,6 +227,9 @@ class SignalScoring:
         # P1-4: Zero-weight disabled signals for current regime
         disabled = getattr(cfg, 'DISABLED_SIGNALS_BY_REGIME', {}).get(regime, [])
 
+        bull_score = 0.0
+        bear_score = 0.0
+
         for signal_name, vote_value in vote_dict.items():
             w = weights.get(signal_name, 1.0)
             if signal_name in disabled:
@@ -249,18 +238,29 @@ class SignalScoring:
             weighted_val = vote_value * w
             weighted_breakdown[signal_name] = weighted_val
             total_score += weighted_val
+            
+            if weighted_val > 0:
+                bull_score += weighted_val
+            elif weighted_val < 0:
+                bear_score += abs(weighted_val)
 
         abs_score = abs(total_score)
 
-        # Decision (apply volatility filter)
-        if volatility_filter_triggered:
-            action = "HOLD"
-        elif total_score >= SCORE_THRESHOLD:
+        # Consensus check
+        total_score_abs = bull_score + bear_score
+        
+        # Decision
+        if total_score >= SCORE_THRESHOLD:
             action = "BUY"
         elif total_score <= -SCORE_THRESHOLD:
             action = "SELL"
         else:
             action = "HOLD"
+            
+        if total_score_abs > 0:
+            consensus = max(bull_score, bear_score) / total_score_abs
+            if consensus < getattr(cfg, 'CONSENSUS_THRESHOLD', 0.65):
+                action = "HOLD"
 
         # Confidence for position sizing (Phase 2)
         # Scale: score 3 = 50%, score 4 = 67%, score 6 = 100%
@@ -305,5 +305,8 @@ class SignalScoring:
                 total_score, regime,
                 " ".join(f"{k}={v:+d}" for k, v in vote_dict.items() if v != 0) or "no signals",
             )
+
+        top3 = sorted(weighted_breakdown.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+        logger.debug(f"Top contributors: {top3}")
 
         return result
