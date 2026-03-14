@@ -56,17 +56,23 @@ def is_signal_enabled(signal_name: str, regime: str) -> bool:
 
 # Default signal weights (all equal to start)
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "ema_cross": 1.5,  # Fresh crossover is a strong signal
-    "ema_trend": 0.8,  # Trend alignment — supporting, not primary
-    "rsi": 1.2,  # RSI extremes are reliable
-    "nw_envelope": 1.3,  # NW mean reversion — proven in our bot
-    "volume": 1.0,  # Volume confirmation
-    "bb_squeeze": 0.7,  # Squeeze is anticipatory, not definitive
-    "adx_regime": 0.8,  # Regime context
-    "cvd": 1.1,  # CVD order flow — strong but unproven, slightly above 1.0
-    "bb_bounce": 1.0,  # BB bounce signal (P1-6)
-    "funding_bias": 1.1,  # Funding rate bias (P1-7)
-    "mtf_bias": 1.5,  # 15m MTF confirmation (P1-8)
+    "ema_cross":        1.4,
+    "rsi_zone":         1.2,
+    "macd_cross":       1.2,
+    "bb_bounce":        1.0,
+    "bb_squeeze":       1.3,
+    "vwap_cross":       1.1,
+    "obv_trend":        0.9,
+    "volume_spike":     1.0,
+    "swing_bias":       1.6,
+    "nw_signal":        1.2,
+    "adx_filter":       1.0,
+    "funding_bias":     0.8,
+    "mtf_bias":         1.5,
+    "ob_imbalance":     1.1,
+    "trade_aggression": 1.3,
+    "liquidity_wall":   0.8,
+    "liquidity_sweep":  1.7,
 }
 
 SCORE_THRESHOLD: float = 3.0  # Minimum |score| to trigger a trade
