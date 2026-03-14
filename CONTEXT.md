@@ -123,7 +123,7 @@ Loads all configuration from environment variables (`.env` file). Key sections:
 - Volatility filter (P1-3): returns HOLD if `atr / atr_ma50` is outside `[ATR_RATIO_MIN, ATR_RATIO_MAX]`
 - Regime signal disabling (P1-4): zero-weights signals listed in `DISABLED_SIGNALS_BY_REGIME[regime]`
 - Weights loaded from `weights.json` (flat or per-regime format)
-- `DEFAULT_WEIGHTS`: ema_cross=1.5, rsi=1.2, nw_envelope=1.3, mtf_bias=1.5, funding_bias=1.1, cvd=1.1, bb_squeeze=0.7, adx_regime=0.8, etc.
+- `DEFAULT_WEIGHTS` (updated 2026-03-14): ema_cross=1.4, rsi_zone=1.2, macd_cross=1.2, bb_bounce=1.0, bb_squeeze=1.3, vwap_cross=1.1, obv_trend=0.9, volume_spike=1.0, swing_bias=1.6, nw_signal=1.2, adx_filter=1.0, funding_bias=0.8, mtf_bias=1.5, ob_imbalance=1.1, trade_aggression=1.3, liquidity_wall=0.8, liquidity_sweep=1.7
 
 ### `risk_engine.py`
 - `RiskEngine.__init__(exchange)` — initialises with config; calls `_sync_daily_balance()`
