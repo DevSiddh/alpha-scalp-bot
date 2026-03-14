@@ -14,7 +14,7 @@ from collections import deque
 
 import pandas as pd
 import numpy as np
-import tinybrain as ta
+import pandas_ta as ta
 import config as cfg
 from loguru import logger
 
