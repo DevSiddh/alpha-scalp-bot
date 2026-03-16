@@ -120,6 +120,29 @@ ExitEngine        NOT shared — one instance PER OPEN POSITION.
                   Never reused across trades or symbols.
 
 ════════════════════════════════════════════════════════════════
+DATA FLOW — SINGLE TRADE END TO END
+════════════════════════════════════════════════════════════════
+
+ 1. BinanceWSManager receives 3m candle close for BTC
+ 2. Routes to BTC SymbolContext
+ 3. FeatureCache computes indicators → FeatureSet
+ 4. OrderFlowCache updates rolling deques
+ 5. AlphaEngine computes → AlphaVotes
+ 6. SubStrategyManager evaluates → SubStrategySignals
+ 7. ShadowTracker simulates all 5 → updates Beta
+ 8. TournamentEngine samples → TournamentResult
+ 9. StrategyRouter checks promote/bench (every 20 candles)
+10. If TournamentResult.action != CASH_MODE:
+      → RiskEngine.can_open_trade() → 7 gates
+      → If all pass: OrderExecutor places entry
+      → ExitEngine instance created for this position
+11. Every subsequent candle for open position:
+      → ExitEngine.on_candle() → state machine update
+      → If State 3: OrderExecutor places exit
+      → TradeTrackerV2.record_trade()
+      → TelegramAlerts.send()
+
+════════════════════════════════════════════════════════════════
 FULL ARCHITECTURE — 5 LAYERS
 ════════════════════════════════════════════════════════════════
 
