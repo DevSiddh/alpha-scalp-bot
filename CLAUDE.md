@@ -93,6 +93,33 @@ STEP 12 — portfolio_correlation_guard.py (RiskEngine final gate)
 STEP 13 — ETH/SOL passive shadow + paper trading 2 weeks
 
 ════════════════════════════════════════════════════════════════
+COMPONENT SHARING RULES (CRITICAL FOR STEPS 11-12)
+════════════════════════════════════════════════════════════════
+
+SymbolContext     NOT shared — one instance per symbol, fully isolated.
+                  BTC SymbolContext never touches ETH SymbolContext.
+
+AlphaEngine       SHARED — stateless, one instance, safe.
+                  Called with different SymbolContext each candle.
+                  Reads only, never writes state.
+
+ShadowTracker     SHARED but keyed by (strategy, symbol) tuple.
+                  ETH and BTC Beta distributions never mix.
+
+RiskEngine        SHARED with split state:
+                  daily_pnl and consecutive_losses → PER SYMBOL
+                  equity_floor                     → GLOBAL (all symbols)
+                  kill_switch                      → GLOBAL
+
+PortfolioCorrelationGuard  SHARED by design — only component that
+                  NEEDS cross-symbol access. Must see ALL open
+                  positions across ALL symbols simultaneously.
+
+ExitEngine        NOT shared — one instance PER OPEN POSITION.
+                  Created on entry, destroyed on exit.
+                  Never reused across trades or symbols.
+
+════════════════════════════════════════════════════════════════
 FULL ARCHITECTURE — 5 LAYERS
 ════════════════════════════════════════════════════════════════
 
