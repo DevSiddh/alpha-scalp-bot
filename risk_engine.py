@@ -3,14 +3,18 @@
 Handles:
 - 3% daily drawdown kill-switch
 - Rolling daily P&L circuit breaker (pauses after X% daily loss)
-- Position sizing (fixed fractional + Kelly Criterion)
+- Three-Strike cooldown (3 consecutive losses → 90-min pause)
+- Equity Floor shutdown (balance < 80% of session start → halt)
+- Active Cash Mode (balance 80-90% of start → 50% position size)
+- Position sizing (fixed fractional + Kelly Criterion, min 300 trades)
+- ATR validation (reject zero/sub-threshold ATR)
+- Minimum SL floor (0.15% of entry)
+- Regime-aware R:R enforcement (RANGING=1.5, TRENDING=2.0, VOLATILE=1.8)
 - ATR-based trailing stop for scalp trades
 - Stop-loss / take-profit calculation (ATR or percentage)
 - Max concurrent trades limiter (scalp + swing combined)
 - Max open-position enforcement per strategy
 - Per-loop balance caching to reduce API calls
-- Regime-aware SL/TP adjustments
-- ATR-based dynamic SL/TP with R:R check (P1-2)
 """
 
 from __future__ import annotations
@@ -73,6 +77,32 @@ class RiskEngine:
         self._trailing_activated: dict[str, bool] = {}  # order_id -> activated
         self.trail_activate_pct: float = getattr(cfg, 'SCALP_TRAIL_ACTIVATE_PCT', 0.004)
         self.trail_atr_mult: float = getattr(cfg, 'SCALP_TRAIL_ATR_MULT', 1.0)
+
+        # GP-S2: Three-Strike cooldown (3 consecutive losses → 90-min pause)
+        self._consecutive_losses: int = 0
+        self._three_strike_cooldown_until: float = 0.0
+        self._three_strike_losses_required: int = getattr(cfg, 'THREE_STRIKE_LOSSES', 3)
+        self._three_strike_cooldown_seconds: float = getattr(cfg, 'THREE_STRIKE_COOLDOWN_SECONDS', 5400.0)
+
+        # GP-S2: Equity Floor (80% of session start → permanent halt)
+        self.equity_floor_active: bool = False
+        self._equity_floor_pct: float = getattr(cfg, 'EQUITY_FLOOR_PCT', 0.80)
+
+        # GP-S2: Active Cash Mode (< 90% equity → 50% position size)
+        self._active_cash_threshold_pct: float = getattr(cfg, 'ACTIVE_CASH_THRESHOLD_PCT', 0.90)
+
+        # GP-S2: Minimum SL floor (0.15% of entry price)
+        self._min_sl_floor_pct: float = getattr(cfg, 'MIN_SL_FLOOR_PCT', 0.0015)
+
+        # GP-S2: ATR minimum threshold (0.05% of entry price)
+        self._atr_min_pct: float = getattr(cfg, 'ATR_MIN_PCT', 0.0005)
+
+        # GP-S2: Regime-aware minimum R:R
+        self._regime_min_rr: dict[str, float] = getattr(cfg, 'REGIME_MIN_RR', {
+            "RANGING": 1.5, "NEUTRAL": 1.5,
+            "TRENDING": 2.0, "TRENDING_UP": 2.0, "TRENDING_DOWN": 2.0,
+            "VOLATILE": 1.8,
+        })
 
         # Trade tracker reference
         self.trade_tracker: Any | None = None
@@ -224,11 +254,24 @@ class RiskEngine:
     # PREMIUM: Daily P&L Circuit Breaker
     # -----------------------------------------------------------------
     def record_trade_pnl(self, pnl: float, won: bool) -> None:
-        """Record realized P&L from a closed trade. Updates circuit breaker."""
+        """Record realized P&L from a closed trade. Updates circuit breaker + three-strike."""
         self.daily_realized_pnl += pnl
         self.daily_trades += 1
         if won:
             self.daily_wins += 1
+            self._consecutive_losses = 0
+        else:
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= self._three_strike_losses_required:
+                self._three_strike_cooldown_until = time.time() + self._three_strike_cooldown_seconds
+                self._consecutive_losses = 0  # reset counter after triggering
+                logger.critical(
+                    "THREE-STRIKE COOLDOWN ACTIVATED | {} consecutive losses | "
+                    "cooling down {:.0f}s ({:.0f}min)",
+                    self._three_strike_losses_required,
+                    self._three_strike_cooldown_seconds,
+                    self._three_strike_cooldown_seconds / 60,
+                )
 
         # Check circuit breaker
         if self.daily_start_balance > 0:
@@ -242,12 +285,83 @@ class RiskEngine:
                     self.daily_realized_pnl, self.daily_trades,
                 )
 
-        logger.info("Trade P&L recorded: ${:.2f} ({}) | daily total: ${:.2f} | trades: {}",
-            pnl, "WIN" if won else "LOSS", self.daily_realized_pnl, self.daily_trades)
+        logger.info("Trade P&L recorded: ${:.2f} ({}) | daily total: ${:.2f} | trades={} | streak={}",
+            pnl, "WIN" if won else "LOSS", self.daily_realized_pnl, self.daily_trades,
+            f"-{self._consecutive_losses}" if not won else "reset")
 
     def check_circuit_breaker(self) -> bool:
         """Return True if daily circuit breaker is active (too many losses today)."""
         return self.daily_circuit_breaker_active
+
+    # -----------------------------------------------------------------
+    # GP-S2: Three-Strike Cooldown
+    # -----------------------------------------------------------------
+    def check_three_strike_cooldown(self) -> bool:
+        """Return True if we are inside a three-strike cooling-off window."""
+        if time.time() < self._three_strike_cooldown_until:
+            remaining = self._three_strike_cooldown_until - time.time()
+            logger.warning(
+                "THREE-STRIKE COOLDOWN active | {:.0f}s ({:.1f}min) remaining",
+                remaining, remaining / 60,
+            )
+            return True
+        return False
+
+    # -----------------------------------------------------------------
+    # GP-S2: Equity Floor & Active Cash Mode
+    # -----------------------------------------------------------------
+    def check_equity_floor(self) -> bool:
+        """Return True (halt) if balance has fallen to or below the equity floor (80%)."""
+        if self.equity_floor_active:
+            return True
+        try:
+            balance = self.get_cached_balance()
+        except Exception:
+            return False
+        if self.daily_start_balance <= 0:
+            return False
+        ratio = balance / self.daily_start_balance
+        if ratio <= self._equity_floor_pct:
+            self.equity_floor_active = True
+            logger.critical(
+                "EQUITY FLOOR HIT | balance={:.2f} = {:.1%} of start={:.2f} (floor={:.0%})",
+                balance, ratio, self.daily_start_balance, self._equity_floor_pct,
+            )
+            return True
+        return False
+
+    def get_active_cash_multiplier(self) -> float:
+        """Return 0.5 if equity is in the Active Cash zone (80-90% of start), else 1.0."""
+        try:
+            balance = self.get_cached_balance()
+        except Exception:
+            return 1.0
+        if self.daily_start_balance <= 0:
+            return 1.0
+        ratio = balance / self.daily_start_balance
+        if self._equity_floor_pct < ratio < self._active_cash_threshold_pct:
+            logger.info(
+                "ACTIVE CASH MODE | equity={:.1%} of start → 50% position size",
+                ratio,
+            )
+            return 0.5
+        return 1.0
+
+    # -----------------------------------------------------------------
+    # GP-S2: ATR Validation
+    # -----------------------------------------------------------------
+    def validate_atr(self, atr: float, entry_price: float) -> bool:
+        """Return False if ATR is zero or suspiciously low (< 0.05% of entry)."""
+        if atr <= 0:
+            logger.warning("ATR validation failed | atr={:.6f} (must be > 0)", atr)
+            return False
+        if entry_price > 0 and (atr / entry_price) < self._atr_min_pct:
+            logger.warning(
+                "ATR validation failed | atr={:.4f} = {:.4%} of price < min {:.4%}",
+                atr, atr / entry_price, self._atr_min_pct,
+            )
+            return False
+        return True
 
     # -----------------------------------------------------------------
     # PREMIUM: Concurrent Trade Limiter
@@ -328,7 +442,9 @@ class RiskEngine:
                 logger.debug("Kelly SKIP | n={} < min={} | using fixed={:.3%}",
                     n_trades, cfg.KELLY_MIN_TRADES, self.risk_per_trade)
 
-        risk_amount = equity * risk_pct
+        # GP-S2: Active Cash Mode — halve size when equity is 80-90% of start
+        cash_mult = self.get_active_cash_multiplier()
+        risk_amount = equity * risk_pct * cash_mult
 
         price_distance = abs(entry_price - stop_price)
         if price_distance == 0:
@@ -343,9 +459,9 @@ class RiskEngine:
         size = min(size, max_size)
 
         logger.info(
-            "Position size | equity={:.2f} | risk_pct={:.2%} | risk$={:.2f} | "
-            "dist={:.2f} | size={:.6f}{}",
-            equity, risk_pct, risk_amount, price_distance, size,
+            "Position size | equity={:.2f} | risk_pct={:.2%} | cash_mult={:.1f} | "
+            "risk$={:.2f} | dist={:.2f} | size={:.6f}{}",
+            equity, risk_pct, cash_mult, risk_amount, price_distance, size,
             " (Kelly)" if kelly_fraction > 0 else "",
         )
         return size
@@ -358,20 +474,21 @@ class RiskEngine:
         """SL with ATR or percentage + taker fee buffer.
 
         P1-2: If atr > 0, uses ATR-based SL with R:R check.
-        Falls back to TOKEN_PROFILES if R:R < MIN_REWARD_RISK_RATIO.
+        GP-S2: Applies regime-aware min R:R and 0.15% SL floor.
 
         Regime adjustment:
         - TRENDING/VOLATILE: widen SL by 20% (let trends breathe)
         - RANGING: standard SL
         """
         buffer = 0.0008
-        regime_mult = 1.2 if regime in ("TRENDING", "VOLATILE") else 1.0
+        regime_mult = 1.2 if regime in ("TRENDING", "VOLATILE", "TRENDING_UP", "TRENDING_DOWN") else 1.0
+        # GP-S2: regime-aware minimum R:R
+        min_rr_ratio = self._regime_min_rr.get(regime, getattr(cfg, 'MIN_REWARD_RISK_RATIO', 1.8))
 
         # P1-2: ATR-based dynamic SL with R:R check
         if atr > 0:
             atr_sl_mult = getattr(cfg, 'ATR_SL_MULTIPLIER', 1.5)
             atr_tp_mult = getattr(cfg, 'ATR_TP_MULTIPLIER', 3.0)
-            min_rr_ratio = getattr(cfg, 'MIN_REWARD_RISK_RATIO', 1.8)
 
             sl_distance = atr * atr_sl_mult
             tp_distance = atr * atr_tp_mult
@@ -388,9 +505,10 @@ class RiskEngine:
                         sl = entry_price - sl_distance * regime_mult
                     else:
                         sl = entry_price + sl_distance * regime_mult
+                    sl = self._apply_sl_floor(sl, entry_price, side)
                     logger.debug(
-                        "ATR SL for {} @ {:.2f} -> {:.2f} (ATR={:.2f}, mult={:.1f}, R:R={:.2f})",
-                        side, entry_price, sl, atr, atr_sl_mult, rr_ratio
+                        "ATR SL for {} @ {:.2f} -> {:.2f} (ATR={:.2f}, mult={:.1f}, R:R={:.2f}, regime={})",
+                        side, entry_price, sl, atr, atr_sl_mult, rr_ratio, regime,
                     )
                     return float(self.exchange.price_to_precision(self.symbol, sl))
 
@@ -410,27 +528,45 @@ class RiskEngine:
             else:
                 sl = entry_price * (1 + effective_sl + buffer)
             logger.debug("SL for {} @ {:.2f} -> {:.2f} (regime={})", side, entry_price, sl, regime)
+
+        sl = self._apply_sl_floor(sl, entry_price, side)
         return float(self.exchange.price_to_precision(self.symbol, sl))
+
+    def _apply_sl_floor(self, sl: float, entry_price: float, side: str) -> float:
+        """GP-S2: Enforce minimum SL distance of 0.15% from entry."""
+        min_distance = entry_price * self._min_sl_floor_pct
+        actual_distance = abs(entry_price - sl)
+        if actual_distance < min_distance:
+            if side.upper() == "BUY":
+                sl = entry_price - min_distance
+            else:
+                sl = entry_price + min_distance
+            logger.warning(
+                "SL floored to min {:.2%} | new_sl={:.2f} (was {:.4f} away, min {:.4f})",
+                self._min_sl_floor_pct, sl, actual_distance, min_distance,
+            )
+        return sl
 
     def get_take_profit(self, entry_price: float, side: str, atr: float = 0.0,
                         regime: str = "RANGING") -> float:
         """TP with ATR or percentage + taker fee buffer.
 
         P1-2: If atr > 0, uses ATR-based TP with R:R check.
-        Falls back to TOKEN_PROFILES if R:R < MIN_REWARD_RISK_RATIO.
+        GP-S2: Uses regime-aware minimum R:R.
 
         Regime adjustment:
         - TRENDING/VOLATILE: widen TP by 30% (let profits run)
         - RANGING: standard TP
         """
         buffer = 0.0008
-        regime_mult = 1.3 if regime in ("TRENDING", "VOLATILE") else 1.0
+        regime_mult = 1.3 if regime in ("TRENDING", "VOLATILE", "TRENDING_UP", "TRENDING_DOWN") else 1.0
+        # GP-S2: regime-aware minimum R:R
+        min_rr_ratio = self._regime_min_rr.get(regime, getattr(cfg, 'MIN_REWARD_RISK_RATIO', 1.8))
 
         # P1-2: ATR-based dynamic TP with R:R check
         if atr > 0:
             atr_sl_mult = getattr(cfg, 'ATR_SL_MULTIPLIER', 1.5)
             atr_tp_mult = getattr(cfg, 'ATR_TP_MULTIPLIER', 3.0)
-            min_rr_ratio = getattr(cfg, 'MIN_REWARD_RISK_RATIO', 1.8)
 
             sl_distance = atr * atr_sl_mult
             tp_distance = atr * atr_tp_mult
@@ -448,8 +584,8 @@ class RiskEngine:
                     else:
                         tp = entry_price - tp_distance * regime_mult
                     logger.debug(
-                        "ATR TP for {} @ {:.2f} -> {:.2f} (ATR={:.2f}, mult={:.1f}, R:R={:.2f})",
-                        side, entry_price, tp, atr, atr_tp_mult, rr_ratio
+                        "ATR TP for {} @ {:.2f} -> {:.2f} (ATR={:.2f}, mult={:.1f}, R:R={:.2f}, regime={})",
+                        side, entry_price, tp, atr, atr_tp_mult, rr_ratio, regime,
                     )
                     return float(self.exchange.price_to_precision(self.symbol, tp))
 
@@ -718,15 +854,24 @@ class RiskEngine:
         if self.check_kill_switch():
             return False, "Kill switch active (daily drawdown limit hit)"
 
-        # 2. Circuit breaker
+        # 2. GP-S2: Equity Floor (permanent halt)
+        if self.check_equity_floor():
+            return False, f"Equity floor hit (balance <= {self._equity_floor_pct:.0%} of start)"
+
+        # 3. Circuit breaker
         if self.check_circuit_breaker():
             return False, f"Circuit breaker active (daily loss >= {self.daily_loss_limit:.1%})"
 
-        # 3. Scalp position limit
+        # 4. GP-S2: Three-Strike cooldown
+        if self.check_three_strike_cooldown():
+            remaining = max(0, self._three_strike_cooldown_until - time.time())
+            return False, f"Three-strike cooldown active ({remaining:.0f}s remaining)"
+
+        # 5. Scalp position limit
         if not self.check_max_positions():
             return False, f"Max scalp positions ({self.max_positions}) reached"
 
-        # 4. Global concurrent trade limit
+        # 6. Global concurrent trade limit
         if not self.check_total_concurrent_trades():
             return False, f"Max concurrent trades ({self.max_concurrent_trades}) reached"
 
@@ -768,13 +913,15 @@ class RiskEngine:
         entry_price: float,
         atr: float,
         is_long: bool = True,
+        regime: str = "RANGING",
     ) -> RiskDecision:
-        """Check if the R:R ratio meets the minimum threshold.
+        """Check if the R:R ratio meets the regime-aware minimum threshold (GP-S2).
 
         Args:
             entry_price: The entry price for the trade.
             atr: Current ATR value.
             is_long: True for long position, False for short.
+            regime: Market regime string for dynamic min R:R selection.
 
         Returns:
             RiskDecision with allowed=False if R:R below threshold.
@@ -784,10 +931,13 @@ class RiskEngine:
 
         reward_risk_ratio = tp_distance / sl_distance
 
-        if reward_risk_ratio < cfg.MIN_REWARD_RISK_RATIO:
+        # GP-S2: regime-aware minimum R:R
+        min_rr = self._regime_min_rr.get(regime, cfg.MIN_REWARD_RISK_RATIO)
+
+        if reward_risk_ratio < min_rr:
             return RiskDecision(
                 allowed=False,
-                reason=f"R:R below {cfg.MIN_REWARD_RISK_RATIO}",
+                reason=f"R:R {reward_risk_ratio:.2f} below {min_rr} ({regime})",
             )
 
         return RiskDecision(allowed=True)
@@ -814,5 +964,8 @@ class RiskEngine:
         # Clear trailing stop state
         self._trailing_stops.clear()
         self._trailing_activated.clear()
+        # GP-S2: Reset intra-day counters (equity floor persists until restart)
+        self._consecutive_losses = 0
+        self._three_strike_cooldown_until = 0.0
         self._sync_daily_balance()
         return summary

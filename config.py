@@ -305,6 +305,33 @@ TOKEN_SL_PCT: float = _TOKEN_PROFILE["sl_pct"]
 TOKEN_TP_PCT: float = _TOKEN_PROFILE["tp_pct"]
 TOKEN_LEVERAGE: int = _TOKEN_PROFILE["leverage"]
 
+# ===== Grand Prix Step 2: Risk Engine Extensions ==============================
+# Three-Strike: 3 consecutive losses → N-second cooldown
+THREE_STRIKE_LOSSES: int = _env("THREE_STRIKE_LOSSES", "3", cast=int)
+THREE_STRIKE_COOLDOWN_SECONDS: float = _env("THREE_STRIKE_COOLDOWN_SECONDS", "5400", cast=float)  # 90 min
+
+# Equity Floor: balance drops to X% of session start → permanent shutdown
+EQUITY_FLOOR_PCT: float = _env("EQUITY_FLOOR_PCT", "0.80", cast=float)  # 80%
+
+# Active Cash Mode: below this equity ratio → half position size
+ACTIVE_CASH_THRESHOLD_PCT: float = _env("ACTIVE_CASH_THRESHOLD_PCT", "0.90", cast=float)  # 90%
+
+# Minimum SL distance as fraction of entry price
+MIN_SL_FLOOR_PCT: float = _env("MIN_SL_FLOOR_PCT", "0.0015", cast=float)  # 0.15%
+
+# ATR validation: minimum ATR as fraction of entry price
+ATR_MIN_PCT: float = _env("ATR_MIN_PCT", "0.0005", cast=float)  # 0.05%
+
+# Regime-aware minimum R:R ratios
+REGIME_MIN_RR: dict = {
+    "RANGING": 1.5,
+    "NEUTRAL": 1.5,
+    "TRENDING": 2.0,
+    "TRENDING_UP": 2.0,
+    "TRENDING_DOWN": 2.0,
+    "VOLATILE": 1.8,
+}
+
 # ===== Regime-Based Signal Disabling ==========================================
 DISABLED_SIGNALS_BY_REGIME: dict[str, list[str]] = {
     "TRENDING_DOWN": ["bb_bounce"],
