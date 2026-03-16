@@ -516,20 +516,11 @@ Sonnet 4.6 (default — current model):
   - Any step marked "hardest" or with mandatory regression tests
   - Steps 9, 10, 11, 12 specifically
 
-Haiku (via Agent tool with model="haiku"):
-  - Codebase exploration, file search, reading existing code
-  - Simple one-file edits already designed by Sonnet
-  - Running and interpreting test output
+All steps use Sonnet — best product over cost savings.
+A bug in a live trading bot costs real money. Never compromise on model quality.
 
 Direct Bash (no subagent):
-  - Git operations, test runs, file moves
-
-Step classification:
-  Step 9  ExitEngine          → Sonnet (hardest, 4 mandatory tests)
-  Step 10 DeepSeekPitBoss     → Sonnet (LLM integration, audit logic)
-  Step 11 SymbolContext       → Sonnet (multi-symbol state isolation)
-  Step 12 CorrelationGuard    → Haiku (math is simple, pattern is clear)
-  Step 13 Paper trading       → Haiku (config + wiring only)
+  - Git operations, test runs, file moves — no model needed
 
 ════════════════════════════════════════════════════════════════
 GIT RULES
