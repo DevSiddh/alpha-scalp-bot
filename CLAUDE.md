@@ -265,17 +265,23 @@ THREE-STRIKE DE-RISK:
 MULTI-SYMBOL ACTIVATION RULES
 ════════════════════════════════════════════════════════════════
 
-BTC/USDT  — ALWAYS active (live + shadow)
-ETH/USDT  — activates for live trading ONLY when BTC == NEUTRAL
-            passive shadow tracking from Day 1
-SOL/USDT  — activates for live trading ONLY when BTC AND ETH == NEUTRAL
-            passive shadow tracking from Day 1
-ALL NEUTRAL → global cash mode
+Every candle close → route_agent_activation() runs:
+
+  BTC/USDT:  ALWAYS              → full pipeline
+  ETH/USDT:  BTC == NEUTRAL      → full pipeline
+             else                → shadow only
+  SOL/USDT:  BTC == NEUTRAL
+             AND ETH == NEUTRAL  → full pipeline
+             else                → shadow only
+  ALL NEUTRAL                    → Global Cash Mode
+
+"Full pipeline" = SignalScoring → Tournament → Router → Risk → Execution
+"Shadow only"   = ShadowTracker runs, no live orders placed
 
 PASSIVE_SHADOW_SYMBOLS=ETH/USDT,SOL/USDT
-  SymbolContext created on startup
-  ShadowTracker runs passively (no live trades)
-  Builds Beta distributions before activation
+  SymbolContext created on startup for all symbols
+  ShadowTracker runs every candle regardless of activation state
+  Builds Beta distributions before live activation (warm start)
 
 Portfolio correlation guard:
   Block if Pearson r > 0.75 AND same direction
