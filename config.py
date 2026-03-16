@@ -85,7 +85,7 @@ SWING_MAX_TOTAL_EXPOSURE_PCT: float = _env("SWING_MAX_TOTAL_EXPOSURE_PCT", "0.02
 # ===== Risk Management ======================================================
 RISK_PER_TRADE: float = _env("RISK_PER_TRADE", "0.01", cast=float)
 # Kelly Criterion warm-up guards
-KELLY_MIN_TRADES: int = _env("KELLY_MIN_TRADES", "30", cast=int)        # ignore Kelly below this
+KELLY_MIN_TRADES: int = _env("KELLY_MIN_TRADES", "300", cast=int)       # ignore Kelly below this
 KELLY_MAX_FRACTION: float = _env("KELLY_MAX_FRACTION", "0.03", cast=float)  # hard cap 3%
 KELLY_RAMP_TRADES: int = _env("KELLY_RAMP_TRADES", "60", cast=int)      # blend fixed->Kelly over 30-60 trades
 DAILY_DRAWDOWN_LIMIT: float = _env("DAILY_DRAWDOWN_LIMIT", "0.03", cast=float)

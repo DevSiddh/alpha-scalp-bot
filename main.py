@@ -16,7 +16,6 @@ B) **Polling mode** (cfg.USE_WEBSOCKET = False, fallback)
 Both modes share:
   - RiskEngine, OrderExecutor, TelegramAlerts, TradeTrackerV2
   - Alpha Engine pipeline (FeatureCache -> AlphaEngine -> SignalScoring)
-  - WeightOptimizer (weekly, triggers at 30 trades)
   - Position monitor (SL/TP detection)
   - Swing trading
   - Kill switch + daily reset
@@ -48,8 +47,6 @@ from trade_tracker_v2 import TradeTrackerV2
 from feature_cache import FeatureCache
 from alpha_engine import AlphaEngine
 from signal_scoring import SignalScoring
-from weight_optimizer import WeightOptimizer
-
 # WebSocket imports (only used when cfg.USE_WEBSOCKET is True)
 try:
     from market_state import MarketState
@@ -399,10 +396,6 @@ async def run_bot_polling() -> None:  # noqa: C901
     feature_cache = FeatureCache()
     alpha_engine = AlphaEngine()
     signal_scoring = SignalScoring()
-
-    # ── Phase 2: Weight Optimizer ──
-    optimizer = WeightOptimizer(tracker)
-    last_optimize_time = 0.0
 
     # Store last scoring result per symbol for position monitor
     last_scoring: dict = {}
@@ -768,22 +761,6 @@ async def run_bot_polling() -> None:  # noqa: C901
                     except Exception as mon_exc:
                         logger.debug("[MONITOR] Error checking {}: {}", sym, mon_exc)
 
-            # ── Phase 2: Periodic weight optimization (weekly) ──
-            _time_opt = time
-            now_opt = _time_opt.time()
-            if now_opt - last_optimize_time >= 86400 * 7:  # 7 days
-                if len(tracker._trades) >= 30:
-                    try:
-                        logger.info("Starting weight optimization cycle...")
-                        success = await asyncio.create_task(optimizer.run_optimization_cycle())
-                        if success:
-                            signal_scoring._load_weights()  # reload updated weights
-                            logger.info("Weight optimization completed successfully")
-                        last_optimize_time = now_opt
-                    except Exception as opt_exc:
-                        logger.error("Weight optimization failed: {}", opt_exc)
-                        last_optimize_time = now_opt  # don't retry immediately
-
         # --- Fix 3: Fatal error = shutdown, transient = retry ---
         except FatalExchangeError as exc:
             logger.critical("FATAL ERROR – shutting down: {}", exc)
@@ -870,8 +847,6 @@ async def run_bot_ws() -> None:
     feature_cache = FeatureCache()
     alpha_engine = AlphaEngine()
     signal_scoring = SignalScoring()
-    optimizer = WeightOptimizer(tracker)
-    last_optimize_time = 0.0
     last_scoring: dict = {}
 
     executor.set_margin_type(cfg.SYMBOL)
@@ -936,7 +911,7 @@ async def run_bot_ws() -> None:
 
     async def on_candle_complete(state: MarketState, meta: dict) -> None:
         """Full alpha pipeline on each completed candle."""
-        nonlocal last_optimize_time, current_date, last_swing_check, last_position_check
+        nonlocal current_date, last_swing_check, last_position_check
 
         # Midnight reset
         is_new_day, today = _is_new_utc_day(current_date)
@@ -1157,21 +1132,6 @@ async def run_bot_ws() -> None:
 
                 except Exception as mon_exc:
                     logger.debug("[MONITOR] Error checking {}: {}", sym, mon_exc)
-
-        # Weight optimizer (weekly, 30 trades threshold)
-        now_opt = time.time()
-        if now_opt - last_optimize_time >= 86400 * 7:
-            if len(tracker._trades) >= 30:
-                try:
-                    logger.info("Starting weight optimization cycle...")
-                    success = await asyncio.create_task(optimizer.run_optimization_cycle())
-                    if success:
-                        signal_scoring._load_weights()
-                        logger.info("Weight optimization completed successfully")
-                    last_optimize_time = now_opt
-                except Exception as opt_exc:
-                    logger.error("Weight optimization failed: {}", opt_exc)
-                    last_optimize_time = now_opt
 
     async def on_book_update(state: MarketState, meta: dict) -> None:
         """Lightweight spread/imbalance refresh on book updates."""
