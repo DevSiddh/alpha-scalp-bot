@@ -39,6 +39,13 @@ FIX-4: ExitEngine 4 tests — test_ranging_exit_hits_fixed_tp, test_trending_tra
 FIX-9: Paper slippage — Market +0.6xspread, Limit +0.1xspread, VOLATILE x2.0
 FIX-10: All-NEUTRAL fallback — global cash mode
 
+## Git Rules
+- Always set git identity before committing:
+  git config user.name "DevSiddh"
+  git config user.email "challayagneshsaisiddhardha@gmail.com"
+- Never commit as Claude
+- Always git push origin main after every commit
+
 ## Bug Fixing Protocol
 1. When I report a bug, write a failing test first
 2. Fix only after test exists
@@ -46,4 +53,12 @@ FIX-10: All-NEUTRAL fallback — global cash mode
 4. Never delete existing tests
 
 ## Current Build Step
-CURRENT STEP: 7 — TournamentEngine (Thompson Sampling)
+COMPLETED: Steps 1, 2, 3 ✅
+CURRENT STEP: 7 and 8 (doing together)
+NEXT: Step 9 — ExitEngine (do fresh session, hardest step)
+
+## Session Notes
+- Repo is Public on GitHub ✅
+- MCPs added: context7, code-review ✅
+- Hooks added: PostToolUse auto-test, PreToolUse safety guard, Notifications ✅
+- .claude/settings.json created ✅
