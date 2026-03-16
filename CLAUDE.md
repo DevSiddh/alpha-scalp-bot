@@ -13,7 +13,7 @@ Asset: BTC/USDT perpetual futures, Binance, 3-minute scalping
 Leverage: 5x scalp, 3x swing
 Fee model: 0.1% taker per side = 0.2% round trip (always deduct)
 Language: Python 3.11
-Testing: pytest, 102 tests currently passing
+Testing: pytest, 102 tests currently passing (Steps 1–8 done)
 Platform: Windows 11, VS Code, Claude as primary engineer
 
 ════════════════════════════════════════════════════════════════
@@ -69,8 +69,23 @@ STEP 6 ✅ — shadow_tracker.py built:
 REMAINING STEPS TO BUILD
 ════════════════════════════════════════════════════════════════
 
-STEP 7  — tournament_engine.py (Thompson Sampling + Cash Mode)
-STEP 8  — strategy_router.py (Promote/bench, 20-candle cycle)
+STEP 7  ✅ — tournament_engine.py built:
+            TournamentEngine — Thompson Sampling over ShadowTracker Betas
+            CASH_SAMPLE_THRESHOLD = 0.50 (THOMPSON_NONE_THRESHOLD)
+            Normalised expectancy min-max scaled to [0,1] per candle pool
+            Equal-expectancy fallback → 0.5 for all (avoids negative values)
+            HmmScheduler (FIX-5): initial train at 87k candles,
+              Sunday retrain when new_candles > 500
+            12 tests passing
+
+STEP 8  ✅ — strategy_router.py built:
+            StrategyRouter — promote/bench lifecycle management
+            FIX-2: burn-in requires candles_seen >= 50 AND distinct_regimes >= 2
+            Velocity check: win-rate drop > 0.30 per 10-trade window → bench
+            Correlation check: Pearson ρ >= 0.85 → bench lower-ranked strategy
+            Telegram alerts on all bench/promote events
+            12 tests passing
+
 STEP 9  — exit_engine.py (4-state machine + 4 regression tests)
 STEP 10 — deepseek_pit_boss.py (audit-only, no weight writes)
 STEP 11 — symbol_context.py (per-symbol isolation)
@@ -431,7 +446,7 @@ When I ask a design question:
   3. Keep answers short — I'm building, not reading essays
 
 Current test status: 102 tests passing
-Current step: Ready for Step 7
+Current step: Ready for Step 9 — ExitEngine (hardest step, do in fresh session)
 
 ════════════════════════════════════════════════════════════════
 GIT RULES
