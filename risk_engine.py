@@ -348,6 +348,32 @@ class RiskEngine:
         return 1.0
 
     # -----------------------------------------------------------------
+    # GP-S3: Spread Guard (standalone, callable before order placement)
+    # -----------------------------------------------------------------
+    def check_spread_guard(self, ask: float, bid: float) -> tuple[bool, str]:
+        """GP-S3: Return (True, 'ok') if bid-ask spread is within MAX_SPREAD_BPS.
+
+        Separates the spread check from sanity_guard() so callers can
+        gate on spread alone without needing all sanity_guard inputs.
+        """
+        if ask <= 0 or bid <= 0:
+            logger.warning("Spread guard: invalid prices ask={} bid={}", ask, bid)
+            return False, "invalid_prices"
+        mid = (ask + bid) / 2
+        if mid <= 0:
+            return False, "invalid_mid"
+        spread_bps = ((ask - bid) / mid) * 10_000
+        max_bps = getattr(cfg, 'MAX_SPREAD_BPS', 20)
+        if spread_bps > max_bps:
+            logger.warning(
+                "Spread guard blocked | {:.1f}bps > {:.0f}bps limit | ask={} bid={}",
+                spread_bps, max_bps, ask, bid,
+            )
+            return False, f"spread_too_wide_{spread_bps:.1f}bps"
+        logger.debug("Spread guard OK | {:.1f}bps <= {:.0f}bps", spread_bps, max_bps)
+        return True, "ok"
+
+    # -----------------------------------------------------------------
     # GP-S2: ATR Validation
     # -----------------------------------------------------------------
     def validate_atr(self, atr: float, entry_price: float) -> bool:

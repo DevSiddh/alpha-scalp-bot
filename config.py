@@ -305,6 +305,10 @@ TOKEN_SL_PCT: float = _TOKEN_PROFILE["sl_pct"]
 TOKEN_TP_PCT: float = _TOKEN_PROFILE["tp_pct"]
 TOKEN_LEVERAGE: int = _TOKEN_PROFILE["leverage"]
 
+# ===== Grand Prix Step 3: Quick Wins ==========================================
+# Spike filter: skip candle if (high - low) > N × ATR
+SPIKE_ATR_MULT: float = _env("SPIKE_ATR_MULT", "3.0", cast=float)
+
 # ===== Grand Prix Step 2: Risk Engine Extensions ==============================
 # Three-Strike: 3 consecutive losses → N-second cooldown
 THREE_STRIKE_LOSSES: int = _env("THREE_STRIKE_LOSSES", "3", cast=int)

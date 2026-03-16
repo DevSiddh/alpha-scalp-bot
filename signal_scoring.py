@@ -21,6 +21,9 @@ Default weights start at 1.0 for all signals.
 
 P1-3: Volatility filter - returns HOLD if atr_ratio outside valid range.
 P1-4: Regime-based signal disabling - zero-weights signals for current regime.
+GP-S3: Spike filter - returns HOLD if candle range > SPIKE_ATR_MULT × ATR.
+GP-S3: ATR-zero guard - returns HOLD if ATR is zero (invalid candle data).
+GP-S3: Max weight validation - clamps all loaded weights to [MIN_WEIGHT, MAX_WEIGHT].
 """
 
 from __future__ import annotations
@@ -101,6 +104,10 @@ class ScoringResult:
     # Volatility filter (P1-3)
     volatility_filter_triggered: bool = False
 
+    # GP-S3: early-exit reason ("" = no early exit, else one of:
+    #   "volatility_filter", "atr_zero", "candle_spike")
+    filter_reason: str = ""
+
     def __post_init__(self):
         if self.vote_details is None:
             self.vote_details = {}
@@ -121,6 +128,7 @@ class ScoringResult:
             "threshold": self.threshold,
             "regime": self.regime,
             "volatility_filter_triggered": self.volatility_filter_triggered,
+            "filter_reason": self.filter_reason,
             "vote_details": self.vote_details,
             "weighted_breakdown": {
                 k: round(v, 2) for k, v in self.weighted_breakdown.items()
@@ -163,19 +171,40 @@ class SignalScoring:
 
             if "default" in data:
                 # Phase 2 format: {"default": {...}, "TRENDING": {...}, ...}
-                self._weights = data["default"]
+                self._weights = self._validate_weights(data["default"])
                 self._regime_weights = {
-                    k: v for k, v in data.items() if k != "default"
+                    k: self._validate_weights(v)
+                    for k, v in data.items() if k != "default"
                 }
                 logger.info("Loaded per-regime weights from {}", self._weights_path)
             else:
                 # Simple format: {"ema_cross": 1.5, ...}
-                self._weights = data
+                self._weights = self._validate_weights(data)
                 logger.info("Loaded flat weights from {}", self._weights_path)
 
         except Exception as exc:
             logger.error("Failed to load weights: {} — using defaults", exc)
             self._weights = dict(DEFAULT_WEIGHTS)
+
+    def _validate_weights(self, weights: dict[str, float]) -> dict[str, float]:
+        """GP-S3: Clamp every weight to [MIN_WEIGHT, MAX_WEIGHT] and warn on violations."""
+        validated: dict[str, float] = {}
+        for name, w in weights.items():
+            if w <= 0:
+                logger.warning(
+                    "Weight '{}' = {:.3f} is <= 0 — clamping to MIN_WEIGHT {:.2f}",
+                    name, w, cfg.MIN_WEIGHT,
+                )
+                validated[name] = cfg.MIN_WEIGHT
+            elif w > cfg.MAX_WEIGHT:
+                logger.warning(
+                    "Weight '{}' = {:.3f} exceeds MAX_WEIGHT {:.2f} — clamping",
+                    name, w, cfg.MAX_WEIGHT,
+                )
+                validated[name] = cfg.MAX_WEIGHT
+            else:
+                validated[name] = w
+        return validated
 
     def _save_weights(self) -> None:
         """Persist current weights to JSON."""
@@ -217,9 +246,33 @@ class SignalScoring:
         ScoringResult
             Full scoring output with breakdown.
         """
+        # GP-S3: ATR-zero guard — invalid candle data, skip entirely
+        if features.atr <= 0:
+            logger.warning("ATR-zero guard triggered | atr={} | skipping signal", features.atr)
+            return ScoringResult(
+                action="HOLD", regime=features.regime, filter_reason="atr_zero",
+            )
+
+        # GP-S3: Candle spike filter — range > N×ATR indicates outlier candle
+        if features.high > 0 and features.low > 0:
+            candle_range = features.high - features.low
+            spike_mult = getattr(cfg, 'SPIKE_ATR_MULT', 3.0)
+            if candle_range > spike_mult * features.atr:
+                logger.warning(
+                    "Spike filter triggered | range={:.4f} > {:.1f}×ATR={:.4f} | skipping signal",
+                    candle_range, spike_mult, features.atr,
+                )
+                return ScoringResult(
+                    action="HOLD", regime=features.regime, filter_reason="candle_spike",
+                )
+
+        # P1-3: Volatility filter — ATR ratio out of bounds
         atr_ratio = features.atr / features.atr_ma50 if features.atr_ma50 > 0 else 1.0
         if atr_ratio > cfg.ATR_RATIO_MAX or atr_ratio < cfg.ATR_RATIO_MIN:
-            return ScoringResult(action="HOLD", volatility_filter_triggered=True, regime=features.regime)
+            return ScoringResult(
+                action="HOLD", volatility_filter_triggered=True,
+                filter_reason="volatility_filter", regime=features.regime,
+            )
         volatility_filter_triggered = False
 
         regime = features.regime
