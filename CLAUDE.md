@@ -2,7 +2,7 @@
 
 ## Project Overview
 Binance BTC/USDT scalping bot. Architecture finalized March 16, 2026.
-Python 3.12. Status: BUILD PHASE — Steps 1 and 2 complete.
+Python 3.12. Status: BUILD PHASE — Steps 1–6 complete.
 
 ## Common Commands
 pytest tests/ -v
@@ -19,10 +19,10 @@ python main.py --live
 ## 13-Step Build Sequence
 Step 1: Freeze weights.json, remove WeightOptimizer — DONE
 Step 2: Risk Engine (Three-Strike, Equity Floor, Cash Mode, Kelly) — DONE
-Step 3: Quick Wins (spike filter, spread guard, ATR min config, max signal weight validation) — 2 hrs
-Step 4: Signal Registry — signal_registry.py [CRITICAL foundation] — 3 hrs
-Step 5: SubStrategyManager (5 strategies + Cash) — 6 hrs
-Step 6: ShadowTracker (Beta distributions, ghost trades) — 5 hrs — FIX-1, FIX-3
+Step 3: Quick Wins (spike filter, spread guard, ATR min config, max signal weight validation) — DONE
+Step 4: Signal Registry — signal_registry.py [CRITICAL foundation] — DONE
+Step 5: SubStrategyManager (5 strategies + Cash) — DONE
+Step 6: ShadowTracker (Beta distributions, ghost trades) — DONE — FIX-1, FIX-3
 Step 7: TournamentEngine (Thompson Sampling) — 4 hrs
 Step 8: StrategyRouter (promote/bench logic) — 4 hrs — FIX-2
 Step 9: ExitEngine + 4 regression tests — 8 hrs — FIX-4
@@ -46,4 +46,4 @@ FIX-10: All-NEUTRAL fallback — global cash mode
 4. Never delete existing tests
 
 ## Current Build Step
-CURRENT STEP: 3 — Quick Wins Batch
+CURRENT STEP: 7 — TournamentEngine (Thompson Sampling)
