@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 CASH_STRATEGY_NAME: str = "Cash"
-CASH_SAMPLE_THRESHOLD: float = 0.45  # winner sample < this → Cash mode
+CASH_SAMPLE_THRESHOLD: float = 0.50  # winner sample < this → Cash mode (THOMPSON_NONE_THRESHOLD)
 
 
 # ---------------------------------------------------------------------------
