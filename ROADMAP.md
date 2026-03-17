@@ -31,6 +31,17 @@ gated by live trade milestones. Check this at the start of every session.
 
 ## Phase 2 — After 200 Live Trades
 
+- [ ] **Step 14 — Dynamic Leverage** (`calculate_dynamic_leverage()` in `risk_engine.py`)
+  - Formula: `final = base × confidence_mult × drawdown_mult × strike_mult + funding_bonus`
+  - Capped at `regime_ceiling` and `SCALP_MAX_LEVERAGE=5`, floored at `1.0×`
+  - Regime ceilings: TRENDING 5×, RANGING 3×, VOLATILE/TRANSITION 2×, NEUTRAL 3×
+  - Confidence multiplier: score < 0.70 → 0.50×, 0.70–0.85 → 0.75×, > 0.85 → 1.00×
+  - Drawdown multiplier: > 3.5% → 0.25×, > 2.0% → 0.50×, else 1.00×
+  - Strike multiplier: 2 consecutive losses → 0.75×, 3 → gate blocks entirely
+  - Funding bonus: +1.0× if funding < -0.0001 AND direction == BUY AND raw < ceiling - 1.0
+  - Gate: `DYNAMIC_LEVERAGE_ENABLED=false` until 200 live trades; returns fixed `LEVERAGE` when false
+  - Log per trade: `leverage_used`, `leverage_regime_ceiling`, `leverage_confidence_mult`, `leverage_drawdown_mult`
+  - 10 mandatory tests (see `llm suggestions/dynamic leavrage.md` for full prompt)
 - [ ] **Activate Kalman signal** (`kalman_signal`, Q=0.001, R=0.01)
   - Add to `signal_registry.py` Phase 2 block
   - Replaces EMA cross + NW signal
