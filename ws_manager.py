@@ -119,7 +119,9 @@ class BinanceWSManager:
             return
 
         self._running = True
-        self._http_session = aiohttp.ClientSession()
+        resolver = aiohttp.ThreadedResolver()
+        connector = aiohttp.TCPConnector(resolver=resolver)
+        self._http_session = aiohttp.ClientSession(connector=connector)
 
         # Seed candle history from REST before WS starts
         await self._seed_candles()
