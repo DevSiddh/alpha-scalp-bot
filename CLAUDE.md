@@ -479,6 +479,27 @@ Total:   ₹404/month operational cost
 Capital: ₹50,000+ recommended for economic viability
 
 ════════════════════════════════════════════════════════════════
+CONTEXT.MD — ALWAYS KEEP IN SYNC
+════════════════════════════════════════════════════════════════
+
+context.md is the single file that explains this entire project
+to other LLMs (ChatGPT, Gemini, Grok). It must stay accurate.
+
+AFTER COMPLETING ANY STEP YOU MUST update context.md:
+
+  1. Section 11 (Build Progress table) — mark step ✅, update test count
+  2. Section 16 (Roadmap) — move completed items to the Completed table,
+     tick off any Phase checklist items that are now done,
+     update Current Status table (tests, mode, symbols)
+  3. Section 4 (Architecture Layers) — if the step added/changed a
+     component, update that component's description and method list
+  4. Section 12 (Critical Fixes) — if the step resolved a FIX, mark it
+  5. Update the last-updated line at the bottom of context.md
+
+RULE: Never close a step session without updating context.md.
+      The file must always reflect the real current state of the bot.
+
+════════════════════════════════════════════════════════════════
 YOUR ROLE AS ENGINEER
 ════════════════════════════════════════════════════════════════
 
@@ -490,6 +511,7 @@ When I ask you to build a step:
   5. Flag any design decision I need to make
   6. Never rewrite completed steps unless I explicitly ask
   7. Ask for existing code if you need to match signatures
+  8. After the step is done and tests pass → update context.md
 
 When I paste an error:
   1. Diagnose the exact cause first

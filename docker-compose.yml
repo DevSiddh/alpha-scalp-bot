@@ -1,0 +1,60 @@
+version: "3.9"
+
+# Grand Prix Alpha-Scalp — Production Docker Compose
+#
+# How it works:
+#   - The entire repo directory is bind-mounted to /app in the container.
+#   - Source code and data files (trades.jsonl, bot_state.json …) live on
+#     the VPS disk — they survive container restarts automatically.
+#   - .venv is excluded from the mount so the container uses its own
+#     pip packages (installed via Dockerfile).
+#   - To update: git pull + docker compose restart bot
+
+services:
+  bot:
+    build: .
+    container_name: alpha-scalp-bot
+    restart: unless-stopped
+
+    # Load all secrets and config from .env (never commit .env to git)
+    env_file: .env
+
+    # Extra env vars that should always be set in production
+    environment:
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      # Bind mount: source code + data files live on VPS filesystem
+      - .:/app
+      # Exclude .venv — container uses its own installed packages, not local venv
+      - /app/.venv
+
+    working_dir: /app
+
+    # Log rotation — prevents disk fill on VPS over weeks of trading
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    # Health check: bot_state.json must exist and be updated within 10 minutes.
+    # If stale → Docker marks unhealthy → you see it in `docker ps`.
+    # Does NOT auto-restart on unhealthy (use alerting instead — avoid mid-trade kill).
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - |
+          import os, sys, time
+          f = 'bot_state.json'
+          if not os.path.exists(f):
+              sys.exit(0)
+          if time.time() - os.path.getmtime(f) > 600:
+              sys.exit(1)
+          sys.exit(0)
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s

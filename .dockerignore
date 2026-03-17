@@ -1,0 +1,44 @@
+# Grand Prix Alpha-Scalp — .dockerignore
+# These are excluded from the Docker build context (docker build).
+# Note: since source code is bind-mounted, this mainly affects `COPY requirements.txt`.
+
+# Python virtual environment (large, not needed in image)
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Test files (not needed in production image)
+tests/
+conftest/
+pytest.ini
+.pytest_cache/
+
+# Git history (not needed in image)
+.git/
+.gitignore
+
+# Claude / IDE config
+.claude/
+.vscode/
+*.md
+
+# Data files (these live on VPS disk, not in image)
+*.jsonl
+*.json
+!requirements.txt
+!weights.json
+
+# Logs
+logs/
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Secrets (never in image)
+.env
+.env.*

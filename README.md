@@ -149,12 +149,83 @@ alpha-scalp-bot/
 ├── backtest.py                  # Historical replay framework
 ├── weight_optimizer.py          # Frozen (WEIGHTS_LOCKED=true)
 ├── requirements.txt
+├── Dockerfile                   # Python 3.11-slim + pip deps
+├── docker-compose.yml           # Production container config
+├── scripts/
+│   ├── setup_vps.sh             # One-command VPS bootstrap
+│   └── auto_update.sh           # git pull + smart restart (cron every 5 min)
 └── tests/                       # 242 tests across all 13 components
 ```
 
 ---
 
-## Setup
+## Deployment — VPS (Docker, recommended)
+
+### One-command setup on a fresh Ubuntu VPS
+
+```bash
+# 1. Copy setup script to the VPS and run it
+curl -O https://raw.githubusercontent.com/DevSiddh/alpha-scalp-bot/main/scripts/setup_vps.sh
+chmod +x setup_vps.sh && sudo ./setup_vps.sh
+```
+
+The script:
+- Installs Docker
+- Clones this repo to `/opt/alpha-scalp`
+- Creates `.env` from template and waits for you to fill in API keys
+- Builds the image and starts the bot
+- Installs a cron job that auto-updates every 5 minutes
+
+### Auto-update flow
+
+```
+You push to main (from local machine)
+        ↓
+Cron on VPS runs auto_update.sh every 5 min
+        ↓
+git fetch → new commit detected?
+        ↓ yes
+Check bot_state.json for open positions
+        ↓ no positions open
+git pull → docker compose up -d
+        ↓
+Bot running on new code within 5 minutes
+```
+
+> **Safety**: the update script never restarts the container while a trade is open.
+> If a position is open it defers and retries at the next 5-minute interval.
+
+### Common VPS commands
+
+```bash
+docker logs -f alpha-scalp-bot          # live log stream
+docker ps                               # status + health
+docker inspect --format='{{.State.Health.Status}}' alpha-scalp-bot
+
+cat /var/log/alpha-scalp-update.log     # auto-update history
+
+docker compose down                     # stop bot
+docker compose up -d                    # start bot
+/opt/alpha-scalp/scripts/auto_update.sh  # force update now
+```
+
+### Switching from Demo to Live
+
+```bash
+# Edit .env on the VPS
+nano /opt/alpha-scalp/.env
+
+# Change:
+BINANCE_DEMO_TRADING=false   # use real Binance Futures
+INITIAL_BALANCE=<your USDT>  # actual account balance
+
+# Restart
+docker compose up -d
+```
+
+---
+
+## Local Setup (development / testing)
 
 ```bash
 git clone https://github.com/DevSiddh/alpha-scalp-bot.git
