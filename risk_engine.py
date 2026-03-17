@@ -63,6 +63,7 @@ class RiskEngine:
         self.daily_trades: int = 0
         self.daily_wins: int = 0
         self.kill_switch_active: bool = False
+        self._start_balance_from_fallback: bool = False
 
         # PREMIUM: Daily P&L circuit breaker
         self.daily_loss_limit: float = getattr(cfg, 'DAILY_LOSS_LIMIT', 0.03)
@@ -185,6 +186,7 @@ class RiskEngine:
     def _sync_daily_balance(self) -> None:
         try:
             self.daily_start_balance = self._fetch_usdt_balance()
+            self._start_balance_from_fallback = False
         except Exception:
             # Demo/testnet API may fail — use a safe default so bot can start
             fallback = getattr(cfg, 'INITIAL_BALANCE', 10000.0)
@@ -193,6 +195,7 @@ class RiskEngine:
                 fallback,
             )
             self.daily_start_balance = fallback
+            self._start_balance_from_fallback = True
             self._cached_balance = fallback
             self._cache_timestamp = time.monotonic()
             self.daily_pnl = 0.0
@@ -236,15 +239,15 @@ class RiskEngine:
             self.kill_switch_active = True
             return True
 
-        # If current balance exceeds start balance it means the start balance
-        # was set from a fallback (fetch failed at startup) and the real balance
-        # is now available. Re-anchor so a stale fallback never triggers kill switch.
-        if current_balance > self.daily_start_balance:
+        # If start balance came from a fallback, re-anchor to real balance now
+        # that the exchange is reachable. Prevents false kill switch on startup.
+        if self._start_balance_from_fallback:
             logger.warning(
-                "Balance re-anchor: start={:.2f} → {:.2f} (startup fallback was stale)",
+                "Re-anchoring daily_start_balance from fallback {:.2f} → {:.2f} (real balance)",
                 self.daily_start_balance, current_balance,
             )
             self.daily_start_balance = current_balance
+            self._start_balance_from_fallback = False
 
         drawdown = (self.daily_start_balance - current_balance) / self.daily_start_balance
         self.daily_pnl = current_balance - self.daily_start_balance
