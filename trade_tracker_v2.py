@@ -54,12 +54,28 @@ class TradeTrackerV2:
         self._signal_stats: dict[str, dict[str, Any]] = {}
         # Format: {"ema_cross": {"trades": 10, "wins": 7, "total_pnl": 45.2, ...}}
 
+        # GP-S6: optional ShadowTracker integration
+        self._shadow_tracker: Any | None = None
+
         # Load existing history
         self.load_history()
         logger.info(
             "TradeTrackerV2 initialised | {} historical trades | file={}",
             len(self._trades), self.history_file,
         )
+
+    # ------------------------------------------------------------------
+    # GP-S6: ShadowTracker integration
+    # ------------------------------------------------------------------
+
+    def attach_shadow_tracker(self, shadow: Any) -> None:
+        """GP-S6: Attach a ShadowTracker instance for ghost-trade tracking."""
+        self._shadow_tracker = shadow
+        logger.info("ShadowTracker attached to TradeTrackerV2")
+
+    def get_shadow_tracker(self) -> Any | None:
+        """Return the attached ShadowTracker, or None if not set."""
+        return self._shadow_tracker
 
     # ------------------------------------------------------------------
     # Persistence

@@ -39,6 +39,7 @@ import config as cfg
 
 from alpha_engine import AlphaVotes
 from feature_cache import FeatureSet
+from signal_registry import SignalRegistry
 
 
 # ===== Phase 1-4: Regime-Based Signal Filtering =============================
@@ -57,26 +58,9 @@ def is_signal_enabled(signal_name: str, regime: str) -> bool:
     return signal_name not in disabled_signals
 
 
-# Default signal weights (all equal to start)
-DEFAULT_WEIGHTS: dict[str, float] = {
-    "ema_cross":        1.4,
-    "rsi_zone":         1.2,
-    "macd_cross":       1.2,
-    "bb_bounce":        1.0,
-    "bb_squeeze":       1.3,
-    "vwap_cross":       1.1,
-    "obv_trend":        0.9,
-    "volume_spike":     1.0,
-    "swing_bias":       1.6,
-    "nw_signal":        1.2,
-    "adx_filter":       1.0,
-    "funding_bias":     0.8,
-    "mtf_bias":         1.5,
-    "ob_imbalance":     1.1,
-    "trade_aggression": 1.3,
-    "liquidity_wall":   0.8,
-    "liquidity_sweep":  1.7,
-}
+# GP-S4: Default weights now sourced from SignalRegistry — single source of truth.
+# Kept as a module-level dict for backward compatibility with existing imports.
+DEFAULT_WEIGHTS: dict[str, float] = SignalRegistry.default_weights()
 
 SCORE_THRESHOLD: float = 3.0  # Minimum |score| to trigger a trade
 
@@ -144,15 +128,21 @@ class SignalScoring:
     Falls back to DEFAULT_WEIGHTS if no file exists.
     """
 
-    def __init__(self, weights_file: str = "weights.json") -> None:
+    def __init__(self, weights_file: str = "weights.json", live_trade_count: int = 0) -> None:
         self._weights_path = Path(weights_file)
         self._weights: dict[str, float] = dict(DEFAULT_WEIGHTS)
         self._regime_weights: dict[str, dict[str, float]] = {}
+        # GP-S4: phase gate — phase-2 signals disabled until this count reaches threshold
+        self._live_trade_count: int = live_trade_count
         self._load_weights()
         logger.info(
-            "SignalScoring initialised | threshold={} | {} signals weighted",
-            SCORE_THRESHOLD, len(self._weights),
+            "SignalScoring initialised | threshold={} | {} signals weighted | live_trades={}",
+            SCORE_THRESHOLD, len(self._weights), self._live_trade_count,
         )
+
+    def update_live_trade_count(self, count: int) -> None:
+        """GP-S4: Update live trade count to unlock Phase-2 signals at 200 trades."""
+        self._live_trade_count = count
 
     # ------------------------------------------------------------------
     # Weight management
@@ -283,17 +273,21 @@ class SignalScoring:
         weighted_breakdown: dict[str, float] = {}
         total_score = 0.0
 
-        # P1-4: Zero-weight disabled signals for current regime
-        disabled = getattr(cfg, 'DISABLED_SIGNALS_BY_REGIME', {}).get(regime, [])
-
         bull_score = 0.0
         bear_score = 0.0
 
         for signal_name, vote_value in vote_dict.items():
             w = weights.get(signal_name, 1.0)
-            if signal_name in disabled:
+            # GP-S4: use SignalRegistry.is_enabled() — covers phase gate + regime disabling
+            if not SignalRegistry.is_enabled(
+                signal_name, regime, self._live_trade_count,
+                getattr(cfg, 'DISABLED_SIGNALS_BY_REGIME', {}),
+            ):
                 w = 0.0
-                logger.debug("Signal {} disabled for regime {} (weight=0)", signal_name, regime)
+                logger.debug(
+                    "Signal {} gated (phase={} regime={}) → weight=0",
+                    signal_name, self._live_trade_count, regime,
+                )
             weighted_val = vote_value * w
             weighted_breakdown[signal_name] = weighted_val
             total_score += weighted_val
