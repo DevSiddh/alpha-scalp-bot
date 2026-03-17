@@ -51,6 +51,14 @@ SYMBOL: str = _env("SYMBOL", "BTC/USDT")
 TIMEFRAME: str = "3m"  # P0-2: Hardcoded to 3m
 LOOKBACK_CANDLES: int = _env("LOOKBACK_CANDLES", "200", cast=int)
 
+# ===== Multi-Symbol Passive Shadow (Step 13) ================================
+PASSIVE_SHADOW_SYMBOLS: list[str] = [
+    s.strip() for s in _env("PASSIVE_SHADOW_SYMBOLS", "ETH/USDT,SOL/USDT").split(",")
+    if s.strip()
+]
+PAPER_TRADING_MODE: bool = _env("PAPER_TRADING_MODE", "false", cast=bool)
+PAPER_SLIPPAGE_PCT: float = _env("PAPER_SLIPPAGE_PCT", "0.0005", cast=float)
+
 # ===== Swing Trading ========================================================
 SWING_ENABLED: bool = _env("SWING_ENABLED", "true", cast=bool)
 SWING_SYMBOLS: list[str] = _env("SWING_SYMBOLS", "BTC/USDT,ETH/USDT,SOL/USDT").split(",")
