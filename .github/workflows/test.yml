@@ -11,8 +11,7 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: |
-          pip install pytest pytest-asyncio
-          pip install pandas numpy loguru
-          pip install pandas-ta==0.3.14b
+          pip install --upgrade pip
+          pip install -r requirements.txt
       - name: Run all tests
-        run: pytest code/tests/ -v
+        run: pytest tests/ -v
