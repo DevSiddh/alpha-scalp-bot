@@ -1,5 +1,10 @@
 # tests/conftest.py
 # Shared fixtures — prevents test drift between files.
+
+# Ensure repo root is on sys.path so bot modules are importable in CI.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 # Matches Grand Prix architecture (Steps 1-8 complete).
 #
 # Available fixtures:
