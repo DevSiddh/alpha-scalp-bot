@@ -226,6 +226,8 @@ class DeepSeekPitBoss:
                 rule_description=latest.get("rule_description", pattern_key),
                 finding_id=latest.get("finding_id", ""),
             )
+            if h is None:
+                continue  # FIX-7: semantic overlap — already being tested
             new_hypotheses.append(h)
             logger.info(
                 "DeepSeekPitBoss Phase 2: new hypothesis {} for pattern '{}' ({} occurrences)",

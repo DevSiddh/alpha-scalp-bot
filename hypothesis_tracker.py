@@ -28,6 +28,7 @@ Meta-Validator:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -57,6 +58,7 @@ SUNSET_DEGRADATION_PCT: float = 0.30
 META_MIN_ACCURACY:      float = 0.55
 MAX_ACTIVE_CONDITIONS:  int   = 5
 SHADOW_EXTEND_TRADES:   int   = 50    # LLM returns UNCERTAIN → extend by this
+OVERLAP_THRESHOLD:      float = 0.70  # FIX-7: Jaccard similarity above this → reject duplicate
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +165,23 @@ class HypothesisTracker:
     # ------------------------------------------------------------------
 
     def add_hypothesis(self, pattern_key: str, rule_description: str,
-                       finding_id: str = "") -> Hypothesis:
-        """Create a new hypothesis and begin shadow testing."""
+                       finding_id: str = "") -> "Hypothesis | None":
+        """Create a new hypothesis and begin shadow testing.
+
+        Returns None (FIX-7) if a semantically overlapping hypothesis already
+        exists among active/shadow-testing entries (Jaccard > OVERLAP_THRESHOLD).
+        """
+        for existing in self._active.values():
+            if existing.status in ("REJECTED", "SUNSETTED"):
+                continue
+            sim = _jaccard_similarity(rule_description, existing.rule_description)
+            if sim > OVERLAP_THRESHOLD:
+                logger.info(
+                    "HypothesisTracker: overlap {:.0%} — rejected '{}' (matches {} '{}')",
+                    sim, pattern_key, existing.hypothesis_id, existing.pattern_key,
+                )
+                return None
+
         h_id = f"H{str(uuid.uuid4())[:6].upper()}"
         h = Hypothesis(
             hypothesis_id=h_id,
@@ -496,3 +513,18 @@ class HypothesisTracker:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _jaccard_similarity(a: str, b: str) -> float:
+    """Token-level Jaccard similarity between two strings. No external deps.
+
+    Splits on non-alphanumeric chars, lowercases, then computes
+    |A ∩ B| / |A ∪ B|. Returns 1.0 if both strings are empty.
+    """
+    tokens_a = set(re.findall(r"[a-z0-9]+", a.lower()))
+    tokens_b = set(re.findall(r"[a-z0-9]+", b.lower()))
+    if not tokens_a and not tokens_b:
+        return 1.0
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)

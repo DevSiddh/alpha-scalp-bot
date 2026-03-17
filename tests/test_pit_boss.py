@@ -16,7 +16,7 @@ from deepseek_pit_boss import (
     _prev_month_str,
 )
 from block_conditions import BlockConditions, BlockResult
-from hypothesis_tracker import HypothesisTracker
+from hypothesis_tracker import HypothesisTracker, _jaccard_similarity
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +453,43 @@ def test_block_conditions_reload_picks_up_changes(tmp_path):
     }]))
     bc.reload()
     assert bc.active_count == 1
+
+
+# ---------------------------------------------------------------------------
+# FIX-7 — semantic overlap check in add_hypothesis
+# ---------------------------------------------------------------------------
+
+def test_add_hypothesis_rejects_high_overlap(tmp_path):
+    """Near-identical rule descriptions → second add returns None (FIX-7)."""
+    tracker = make_tracker(tmp_path)
+    desc = "Block entries when a bearish FVG is directly overhead"
+    tracker.add_hypothesis("pattern_a", desc)
+
+    # Slightly reworded but same meaning — Jaccard will be > 0.70
+    similar = "Block entries when bearish FVG is directly overhead on chart"
+    result = tracker.add_hypothesis("pattern_b", similar)
+    assert result is None
+
+
+def test_add_hypothesis_accepts_low_overlap(tmp_path):
+    """Distinct rule descriptions → both hypotheses created successfully."""
+    tracker = make_tracker(tmp_path)
+    tracker.add_hypothesis("pattern_a", "Block counter-trend long entries in downtrend")
+    h = tracker.add_hypothesis("pattern_b", "Block entries when funding rate is extremely positive")
+    assert h is not None
+    assert h.pattern_key == "pattern_b"
+
+
+def test_jaccard_similarity_values():
+    """Unit-test the similarity helper directly."""
+    assert _jaccard_similarity("block counter trend entry", "block counter trend entry") == 1.0
+    assert _jaccard_similarity("block counter trend entry", "something completely different here") < 0.30
+    # Partial overlap
+    sim = _jaccard_similarity(
+        "block entries when bearish fvg overhead",
+        "block entries when bearish fvg is overhead",
+    )
+    assert sim > 0.70
 
 
 def test_block_conditions_active_count(tmp_path):
