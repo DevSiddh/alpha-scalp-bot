@@ -1,7 +1,12 @@
-# Alpha-Scalp Bot — pinned for Python 3.12+
+# Alpha-Scalp Bot — CI + test dependencies (Python 3.11)
+#
+# pandas-ta is NOT listed here because:
+#   - PyPI only has 0.4.x+ which requires Python >=3.12
+#   - conftest.py injects a no-op stub so tests run without it
+#   - Production VPS: pip install pandas-ta==0.3.14b0 --index-url ... manually
+#
 ccxt>=4.2.0
 pandas>=2.1.0
-pandas-ta>=0.3.14b
 numpy>=1.26.0
 loguru>=0.7.2
 python-dotenv>=1.0.0
