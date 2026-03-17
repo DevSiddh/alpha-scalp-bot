@@ -1,7 +1,11 @@
 # conftest.py — test collection setup
 import sys
+import os
 import types
 import warnings
+
+# Add repo root to sys.path — must be first so all bot modules are importable.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # ---------------------------------------------------------------------------
 # pandas_ta stub — injected when the real package is not installed.
