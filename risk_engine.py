@@ -236,6 +236,16 @@ class RiskEngine:
             self.kill_switch_active = True
             return True
 
+        # If current balance exceeds start balance it means the start balance
+        # was set from a fallback (fetch failed at startup) and the real balance
+        # is now available. Re-anchor so a stale fallback never triggers kill switch.
+        if current_balance > self.daily_start_balance:
+            logger.warning(
+                "Balance re-anchor: start={:.2f} → {:.2f} (startup fallback was stale)",
+                self.daily_start_balance, current_balance,
+            )
+            self.daily_start_balance = current_balance
+
         drawdown = (self.daily_start_balance - current_balance) / self.daily_start_balance
         self.daily_pnl = current_balance - self.daily_start_balance
 
